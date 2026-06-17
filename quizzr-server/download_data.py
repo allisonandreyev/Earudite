@@ -53,7 +53,7 @@ def main():
     cred = credentials.Certificate(secret_path)
     mongodb_client = pymongo.MongoClient(connection_string)
     firebase_admin.initialize_app(cred, {
-        "storageBucket": "quizzrio.appspot.com"
+        "storageBucket": "earudite-5aa9e.firebasestorage.app"
     })
     bucket = storage.bucket()
 

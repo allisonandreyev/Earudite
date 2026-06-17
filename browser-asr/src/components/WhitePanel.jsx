@@ -36,12 +36,13 @@ import StyledFirebaseAuth from 'react-firebaseui/StyledFirebaseAuth';
 import firebase from 'firebase';
 import StandardLobby from "./StandardLobby";
 const firebaseConfig = {
-    apiKey: "AIzaSyAG6lyTJ99-GVVp16JmmnqXKxpkZFUUtrM",
-    authDomain: "reu26-9dd73.firebaseapp.com",
-    projectId: "reu26-9dd73",
-    storageBucket: "reu26-9dd73.firebasestorage.app",
-    messagingSenderId: "764528880181",
-    appId: "1:764528880181:web:d07a8779733a8dd3389f7c"
+    apiKey: "AIzaSyC2KtfXjpzeTsKJnIWJN9pgm_4s9zfG5Yk",
+    authDomain: "earudite-5aa9e.firebaseapp.com",
+    projectId: "earudite-5aa9e",
+    storageBucket: "earudite-5aa9e.firebasestorage.app",
+    messagingSenderId: "144549572814",
+    appId: "1:144549572814:web:733923779282760c0ea09f",
+    measurementId: "G-R13200YXJ6"
   };
 // Initialize Firebase
 if (!firebase.apps.length) {
