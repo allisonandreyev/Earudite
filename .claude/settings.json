@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm uninstall *)",
+      "Bash(npx nodejs-whisper *)",
+      "Bash(xcode-select -p)",
+      "Bash(brew list *)",
+      "Bash(brew install *)",
+      "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")",
+      "Bash(cmake --version)",
+      "Bash(bash download-ggml-model.sh base.en-q5_1)",
+      "Bash(ffmpeg -i samples/jfk.mp3 -ar 16000 -ac 1 /tmp/jfk.wav -y)",
+      "Bash(/opt/homebrew/bin/ffmpeg -version)",
+      "Bash(/Users/allisonandreyev_unrestricted/Desktop/Earudite/server/node_modules/nodejs-whisper/cpp/whisper.cpp/build/bin/whisper-cli --help)",
+      "Bash(python3 -c ' *)",
+      "Bash(/Users/allisonandreyev_unrestricted/Desktop/Earudite/server/node_modules/nodejs-whisper/cpp/whisper.cpp/build/bin/whisper-cli -m /Users/allisonandreyev_unrestricted/Desktop/Earudite/server/node_modules/nodejs-whisper/cpp/whisper.cpp/models/ggml-base.en-q5_1.bin -f /tmp/test.wav -nt -np)",
+      "Bash(echo \"EXIT:$?\")",
+      "Read(//tmp/**)",
+      "Bash(/Users/allisonandreyev_unrestricted/Desktop/Earudite/server/node_modules/nodejs-whisper/cpp/whisper.cpp/build/bin/whisper-cli -m /Users/allisonandreyev_unrestricted/Desktop/Earudite/server/node_modules/nodejs-whisper/cpp/whisper.cpp/models/ggml-base.en-q5_1.bin -f /tmp/test.wav -nt --no-prints)",
+      "Bash(node -e ' *)",
+      "Bash(node server.js)",
+      "Bash(curl -s -F \"audio=@/tmp/test.wav\" http://localhost:6800/api/transcribe)",
+      "Bash(kill %1)"
+    ]
+  }
+}

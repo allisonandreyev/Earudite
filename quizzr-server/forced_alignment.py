@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import logging
-import gentle
+try:
+    import gentle
+except ImportError:
+    gentle = None
 import multiprocessing
 '''
 Created on Apr 30, 2021

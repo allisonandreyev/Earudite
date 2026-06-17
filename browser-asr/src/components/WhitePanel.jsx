@@ -36,12 +36,12 @@ import StyledFirebaseAuth from 'react-firebaseui/StyledFirebaseAuth';
 import firebase from 'firebase';
 import StandardLobby from "./StandardLobby";
 const firebaseConfig = {
-    apiKey: "AIzaSyCiKPy60wLQMYdttnGec8BFbUUs1Y60yuE",
-    authDomain: "quizzrio.firebaseapp.com",
-    projectId: "quizzrio",
-    storageBucket: "quizzrio.appspot.com",
-    messagingSenderId: "770436468924",
-    appId: "1:770436468924:web:d9203acd685d6b3b1a40b9"
+    apiKey: "AIzaSyAG6lyTJ99-GVVp16JmmnqXKxpkZFUUtrM",
+    authDomain: "reu26-9dd73.firebaseapp.com",
+    projectId: "reu26-9dd73",
+    storageBucket: "reu26-9dd73.firebasestorage.app",
+    messagingSenderId: "764528880181",
+    appId: "1:764528880181:web:d07a8779733a8dd3389f7c"
   };
 // Initialize Firebase
 if (!firebase.apps.length) {
@@ -331,6 +331,16 @@ function BigWhitePanel() {
         });
         return () => unregisterAuthObserver(); // Make sure we un-register Firebase observers when the component unmounts.
     }, [alert, setAuthtoken, setProfile, setScreen, urls, setPlayScreen]);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const user = firebase.auth().currentUser;
+            if (user) {
+                user.getIdToken(true).then(idToken => setAuthtoken(idToken)).catch(() => {});
+            }
+        }, 50 * 60 * 1000);
+        return () => clearInterval(interval);
+    }, [setAuthtoken]);
 
     function isChrome() {
         var isChromium = window.chrome;

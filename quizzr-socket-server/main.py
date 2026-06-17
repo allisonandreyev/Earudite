@@ -1,5 +1,5 @@
-from audioop import reverse
 import eventlet
+import eventlet.tpool
 
 eventlet.monkey_patch()
 from flask import Flask, render_template, request, jsonify
@@ -18,12 +18,15 @@ import json
 import string
 from flask_cors import CORS
 import operator
+import whisper
 
 app = Flask(__name__)
 CORS(app)
 firebase_app = initialize_app()
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY")
 socketio = SocketIO(app, cors_allowed_origins="*", logger=True)
+
+whisper_model = None  # loaded lazily on first request or at startup via --whispermodel arg
 
 # SHARED BETWEEN THREADS
 current_lobby = {}  # UID : room name
@@ -85,16 +88,18 @@ def only_connection(username): # checks if an incoming username is already activ
 def emit_game_state(sleep_time=0.1):  # emits the game state (time left on clock, who is buzzing, time remaining in
     # the buzz, points, etc.)
     while True:
-        for gamecode in games:
-            gamestate = games[gamecode].gamestate()
-            if gamecode in previous_gamestate:
-                if previous_gamestate[gamecode][2] != gamestate[2]:
+        for gamecode in list(games.keys()):
+            try:
+                gamestate = games[gamecode].gamestate()
+                if gamecode in previous_gamestate:
+                    if previous_gamestate[gamecode][2] != gamestate[2]:
+                        games[gamecode].get_new_question()
+                else:
                     games[gamecode].get_new_question()
-            else:
-                games[gamecode].get_new_question()
-                # socketio.emit('newquestion', games[gamecode].get_new_question(), to=gamecode)
-            socketio.emit('gamestate', games[gamecode].gamestate(), to=gamecode)
-            previous_gamestate[gamecode] = gamestate
+                socketio.emit('gamestate', gamestate, to=gamecode)
+                previous_gamestate[gamecode] = gamestate
+            except Exception as e:
+                print(f"Error in emit_game_state for {gamecode}: {e}")
         eventlet.sleep(sleep_time)
 
 
@@ -189,10 +194,14 @@ def start_lobby(json, methods=['GET', 'POST']):
     cache_user(json['auth'])
     user = get_user(json['auth'])
     username = user['username']
-    
-    if not only_connection(username):
-        emit('alert', ['error', 'Already in a running lobby/game'])
-        return
+
+    # Clean up any stale session state so a user can always start a fresh lobby
+    old_lobby = current_lobby.pop(username, None)
+    if old_lobby and old_lobby in lobbies:
+        try:
+            lobbies[old_lobby].leave(username)
+        except Exception:
+            pass
 
     clients[request.sid] = username
     reverse_clients[username] = request.sid
@@ -264,10 +273,17 @@ def update_settings(json, methods=['GET', 'POST']):
 @socketio.on('leavelobby')
 def leave_lobby(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
     username = user['username']
 
+    lobby = current_lobby.pop(username, None)
+    if lobby is None:
+        return
+
     leave_room(lobby)
+
+    if lobby not in lobbies:
+        return
+
     lobbies[lobby].leave(username)
     emit('lobbystate', lobbies[lobby].state(), to=lobby)
     emit('alert', ['show', str(username) + ' left the lobby'], to=lobby)
@@ -333,14 +349,15 @@ def answer(json, methods=['GET', 'POST']):
             requests.patch(os.environ.get("BACKEND_URL") + '/downvote/' + qid, headers={"Authorization": json['auth']})
 
 
-# Socket endpoint for classifier results
+# Socket endpoint for Whisper audio answer results
 @socketio.on('audioanswer')
 def audioanswer(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
     username = user['username']
     lobby = current_lobby[user['username']]
 
-    answered = games[lobby].classifier_answer(username, json['filename'])
+    transcription = json.get('transcription', '')
+    answered = games[lobby].classifier_answer(username, transcription)
     if not answered:
         emit('alert', ['error', "You can't answer right now"])
 
@@ -364,16 +381,29 @@ def leaderboards(json, methods=['GET', 'POST']):
         emit('leaderboards', {'leaderboard': leaderboard1[0:10], 'rank': [-1, -1]})
 
 
-# TODO broken for some reason?
-# @socketio.on('disconnect')
-# def user_disconnected():
-#     username = clients[request.sid]
-#     lobby = current_lobby[username]
-#
-#     leave_room(lobby)
-#     lobbies[lobby].leave(username)
-#     emit('lobbystate', lobbies[lobby].state(), to=lobby)
-#     emit('alert', ['show', str(username) + ' left the lobby'], to=lobby)
+@socketio.on('disconnect')
+def user_disconnected():
+    username = clients.get(request.sid)
+    if username is None:
+        return
+
+    lobby = current_lobby.pop(username, None)
+    if lobby is None:
+        return
+
+    leave_room(lobby)
+
+    if lobby not in lobbies:
+        return
+
+    lobbies[lobby].leave(username)
+    emit('lobbystate', lobbies[lobby].state(), to=lobby)
+    emit('alert', ['show', str(username) + ' left the lobby'], to=lobby)
+
+def _run_whisper(audio_path):
+    result = whisper_model.transcribe(audio_path, language="en")
+    return result["text"].strip()
+
 
 @app.route('/audioanswerupload', methods=['POST'])
 def audioanswerupload():
@@ -381,9 +411,11 @@ def audioanswerupload():
     username = user['username']
     lobby = current_lobby[user['username']]
 
-    # get qid
+    # get qid using the question/round captured by the client at buzz time
     current_game = games[lobby]
-    qid = current_game.answering_ids[current_game.round - 1][current_game.question - 1]
+    client_round = int(request.form.get("round", current_game.round))
+    client_question = int(request.form.get("question", current_game.question))
+    qid = current_game.answering_ids[client_round - 1][client_question - 1]
 
     # upload file and get filename
     file = request.files['audio']
@@ -391,11 +423,20 @@ def audioanswerupload():
     while os.path.exists('./answer-audios/' + filename):
         filename = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(20)) + '.wav'
 
-    file.save(os.path.join('./answer-audios', filename))
+    audio_path = os.path.join('./answer-audios', filename)
+    file.save(audio_path)
     file.close()
 
-    # response
-    response = jsonify({'filename': filename})
+    # transcribe with Whisper (run in thread pool so eventlet green threads aren't blocked)
+    transcription = ""
+    if whisper_model is not None:
+        try:
+            transcription = eventlet.tpool.execute(_run_whisper, audio_path)
+        except Exception as e:
+            print("Whisper transcription error:", e)
+
+    print(f"Whisper transcribed '{filename}' as: {transcription!r}")
+    response = jsonify({'filename': filename, 'transcription': transcription})
     return response
 
 
@@ -454,12 +495,23 @@ if __name__ == '__main__':
         type=str,
         default="http://localhost:5110",
     )
+    parser.add_argument(
+        "--whispermodel",
+        dest="whispermodel",
+        type=str,
+        default="base",
+        help="Whisper model size: tiny, base, small, medium, large",
+    )
     args = parser.parse_args()
     os.environ["HLS_HANDSHAKE"] = args.handshake
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = args.secretpath
     os.environ["HLS_URL"] = args.hlsurl
     os.environ["BACKEND_URL"] = args.backendurl
     os.environ["SOCKET_PORT"] = str(args.socketport)
+
+    print(f"Loading Whisper model '{args.whispermodel}'...")
+    whisper_model = whisper.load_model(args.whispermodel)
+    print("Whisper model loaded.")
     eventlet.spawn(emit_game_state)
     eventlet.spawn(emit_lobby_state)
     eventlet.spawn(clean_lobbies_and_games)

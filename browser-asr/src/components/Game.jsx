@@ -525,17 +525,9 @@ function Game() {
     setPrevState(state);
   }, [username, state, prevState.points]);
 
-  // const [hls, isParsed] = 
+  // const [hls, isParsed] =
   useQuestion({
-    onCue: (cue) => {
-      var div = document.getElementById("transcript-box");
-      let splitarr = div.innerHTML.split(" ");
-      if (cue === splitarr[splitarr.length - 1]) {
-        return;
-      }
-
-      if (div) div.innerHTML = div.innerHTML + "  \n" + cue;
-    },
+    onCue: () => {},  // cue display handled by the addtrack effect below
     backend_url: urls["HLS"] + "/hls",
     recording_id: rid,
     token: token,
@@ -545,6 +537,32 @@ function Game() {
       seeking: false,
     },
   });
+
+  // Attach cuechange listeners via addtrack so they survive hls.js detach/reattach
+  // between questions. useQuestion's loadedmetadata approach is removed on pause,
+  // breaking text display for question 2+.
+  useEffect(() => {
+    const video = document.getElementById("hls");
+    if (!video) return;
+
+    function onCueChange(e) {
+      const cue = e.currentTarget?.activeCues?.[0]?.text;
+      if (!cue) return;
+      const div = document.getElementById("transcript-box");
+      if (!div) return;
+      const parts = div.innerHTML.split(" ");
+      if (cue === parts[parts.length - 1]) return;
+      div.innerHTML = div.innerHTML + "  \n" + cue;
+    }
+
+    function onAddTrack(e) {
+      e.track.mode = "showing";
+      e.track.addEventListener("cuechange", onCueChange);
+    }
+
+    video.textTracks.addEventListener("addtrack", onAddTrack);
+    return () => video.textTracks.removeEventListener("addtrack", onAddTrack);
+  }, []);
 
   function buzz() {
     state.socket.emit("buzz", {

@@ -51,8 +51,8 @@
     "yarn": "^1.22.11"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "start": "NODE_OPTIONS=--openssl-legacy-provider react-scripts start",
+    "build": "NODE_OPTIONS=--openssl-legacy-provider react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
@@ -61,6 +61,11 @@
       "react-app",
       "react-app/jest"
     ]
+  },
+  "overrides": {
+    "postcss-safe-parser": {
+      "postcss": "^8.4.31"
+    }
   },
   "browserslist": {
     "production": [

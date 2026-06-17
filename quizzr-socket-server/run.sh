@@ -1,5 +1,6 @@
 python main.py \
 --socketport 4000 \
---secretpath "/Users/andrewchen/VS Code Projects/ASRQA_Interface/quizzr-socket-server/secrets/quizzrio-273c20124a71.json" \
---hlsurl "http://localhost:7000" \
---backendurl "http://localhost:5000"
+--secretpath "$HOME/Downloads/reu26-9dd73-firebase-adminsdk-fbsvc-bc25425cdb.json" \
+--hlsurl "http://localhost:4440" \
+--backendurl "http://localhost:5110" \
+--whispermodel base

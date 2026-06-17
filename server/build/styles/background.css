@@ -1,0 +1,21 @@
+:root{
+    font-family: 'Mulish', sans-serif;
+    overflow-x: hidden;
+}
+
+.full-bg {
+    background-image: url(../assets/blob-scene-haikei.svg);
+    background-size: cover;
+    
+}
+
+
+
+.center-screen {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    min-height: 100vh;
+}

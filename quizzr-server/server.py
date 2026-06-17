@@ -225,8 +225,9 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
     app.logger.info("Initialized third-party services")
 
     app.logger.debug("Instantiating process...")
-    prescreen_results_queue = multiprocessing.Queue()
-    qw_process = multiprocessing.Process(target=rec_processing.start_watcher, kwargs={
+    mp_ctx = multiprocessing.get_context("fork")
+    prescreen_results_queue = mp_ctx.Queue()
+    qw_process = mp_ctx.Process(target=rec_processing.start_watcher, kwargs={
         "db_name": app_conf["DATABASE"],
         "tpm_config": app_conf,
         "firebase_app_specifier": qtpm.app,

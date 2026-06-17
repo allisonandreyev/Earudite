@@ -47,7 +47,7 @@ class QuizzrTPM:
         if type(firebase_app_specifier) is str:
             cred = credentials.Certificate(firebase_app_specifier)
             self.app = firebase_admin.initialize_app(cred, {
-                "storageBucket": "quizzrio.appspot.com"
+                "storageBucket": "reu26-9dd73.firebasestorage.app"
             })
 
         self.bucket = storage.bucket()

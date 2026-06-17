@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import string
 from datetime import datetime, timedelta
 from typing import Tuple, Iterable
 
-from gentle import transcription
+try:
+    from gentle import transcription
+except ImportError:
+    transcription = None
 
 
 def aligned_word_to_vtt_cue(word_entry: transcription.Word, speaker_name="Speaker 0"):

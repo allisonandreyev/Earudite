@@ -90,8 +90,8 @@ class Game:
                     data={
                         "handshake": os.environ.get("HLS_HANDSHAKE"),
                         "qids": [i[0] for i in self.questions],
+                        "qb_ids": [str(i[1]) for i in self.questions],
                         "expiry": str(expiry_time)
-                        # all the questions added up + the gap times between them + 30 seconds
                     },
                 )
                 print(hls_response.json())
@@ -214,15 +214,16 @@ class Game:
             unlock_next = True
             if self.get_question_time() <= 0:
                 if len(self.prev_answers) == 0 or not self.prev_answers[-1][1] or self.prev_answers[-1][0] == 'Answered via classifier':
-                    correct_answer = requests.get(
-                        os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1])
-                    ).json()
-                    self.prev_answers.append([correct_answer['answer'], True])
+                    try:
+                        correct_answer = requests.get(
+                            os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1])
+                        ).json()
+                        self.prev_answers.append([correct_answer['answer'], True])
+                    except Exception as e:
+                        print(f"Failed to fetch correct answer: {e}")
                 self.question += 1
                 self.active_gap = [True, time.time()]
                 self.active_question = [False, 0]
-                # add correct answers to answer list
-
 
                 if self.question > self.questions_num:
                     self.question = 1
@@ -239,14 +240,17 @@ class Game:
                     question_idx = (
                             ((self.round - 1) * self.questions_num) + self.question - 1
                     )
-                    unlock_response = requests.post(
-                        os.environ.get("HLS_URL") + "/api/unlock",
-                        data={
-                            "handshake": os.environ.get("HLS_HANDSHAKE"),
-                            "rid": self.hls_rids[question_idx],
-                        },
-                    ).json()
-                    self.hls_tokens[question_idx] = unlock_response["token"]
+                    try:
+                        unlock_response = requests.post(
+                            os.environ.get("HLS_URL") + "/api/unlock",
+                            data={
+                                "handshake": os.environ.get("HLS_HANDSHAKE"),
+                                "rid": self.hls_rids[question_idx],
+                            },
+                        ).json()
+                        self.hls_tokens[question_idx] = unlock_response["token"]
+                    except Exception as e:
+                        print(f"Failed to unlock next question: {e}")
                     
 
         return [
@@ -295,6 +299,7 @@ class Game:
         if not self.active_buzz[0]:
             return False
         else:
+            buzz_start = self.active_buzz[1]  # save before yielding to eventlet
             correct = json.loads(
                 requests.get(
                     os.environ.get("BACKEND_URL") + "/answer",
@@ -305,6 +310,9 @@ class Game:
                     headers={"Authorization": self.auth_token},
                 ).text
             )["correct"]
+            # buzz may have timed out during the HTTP request (gamestate clears active_buzz)
+            if not self.active_buzz[0]:
+                return False
             print(
                 "qb_id for current question: "
                 + str(self.answering_ids[self.round - 1][self.question - 1])
@@ -320,7 +328,7 @@ class Game:
             )
             self.prev_answers.append([answer, correct])
             self.active_question[1] = (
-                    time.time() - self.active_buzz[1] + self.active_question[1]
+                    time.time() - buzz_start + self.active_question[1]
             )  # readjust active question timer
             self.buzz_recording[self.round - 1][self.question - 1].append(
                 ["answer", correct, self.get_buzz_time(), username]
@@ -354,32 +362,42 @@ class Game:
 
         # check answer while buzzed
 
-    def classifier_answer(self, username, filename):
-        print("classifier_answer reached with filename " + filename)
-        # if game is over, return 0
+    def classifier_answer(self, username, transcription):
+        print("classifier_answer reached with transcription: " + transcription)
         if not self.active_buzz[0]:
             print("classifier_answer no active buzz")
             return False
         else:
             qid = self.answering_ids[self.round - 1][self.question - 1]
-            print("classifier_answer found file")
-            correct = True
-            # correct = classify_and_upload(filename, qid)
+            buzz_start = self.active_buzz[1]  # save before yielding to eventlet
+            correct = json.loads(
+                requests.get(
+                    os.environ.get("BACKEND_URL") + "/answer",
+                    params={"a": transcription, "qid": qid},
+                    headers={"Authorization": self.auth_token},
+                ).text
+            )["correct"]
+            # buzz may have timed out during the HTTP request (gamestate clears active_buzz)
+            if not self.active_buzz[0]:
+                print("classifier_answer buzz expired during HTTP request")
+                return False
             print(
                 "qb_id for current question: "
                 + str(self.answering_ids[self.round - 1][self.question - 1])
             )
             print(
-                "Audio for Q:"
+                "Whisper transcript '"
+                + transcription
+                + "' for Q:"
                 + str(self.question)
                 + "/R:"
                 + str(self.round)
-                + " was classified as "
+                + " was "
                 + ("correct" if correct else "incorrect")
             )
-            self.prev_answers.append(["Answered via classifier", correct])
+            self.prev_answers.append([transcription or "Answered via Whisper", correct])
             self.active_question[1] = (
-                    time.time() - self.active_buzz[1] + self.active_question[1]
+                    time.time() - buzz_start + self.active_question[1]
             )  # readjust active question timer
             self.buzz_recording[self.round - 1][self.question - 1].append(
                 ["answer", correct, self.get_buzz_time(), username]

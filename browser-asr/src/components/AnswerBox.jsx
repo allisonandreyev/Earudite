@@ -101,8 +101,22 @@ function AnswerBox(props) {
   const authtoken = useRecoilValue(AUTHTOKEN);
   const alert = useAlert();
   const socket = useRecoilValue(SOCKET);
-  // const [showProgressBar, setShowProgressBar] = useState(false);
   const [speechMode, setSpeechMode] = useState(0);
+  const speechModeRef = useRef(0);
+
+  const [whisperUploading, setWhisperUploading] = useState(false);
+  const [whisperStatus, setWhisperStatus] = useState("idle");
+  const authRef = useRef(authtoken);
+  const urlsRef = useRef(urls);
+  const socketRef = useRef(socket);
+  const alertRef = useRef(alert);
+  useEffect(() => { authRef.current = authtoken; }, [authtoken]);
+  useEffect(() => { urlsRef.current = urls; }, [urls]);
+  useEffect(() => { socketRef.current = socket; }, [socket]);
+  useEffect(() => { alertRef.current = alert; }, [alert]);
+
+  const audioStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
 
   // ASR always picks up the wake word, this function removes it
   function complete(answer) {
@@ -115,8 +129,61 @@ function AnswerBox(props) {
   }
 
   const textAnswer = useRef(null);
+  const buzzedQuestionRef = useRef(props.question);
+  const buzzedRoundRef = useRef(props.state.round);
+
+  function whisperStart() {
+    if (!audioStreamRef.current) {
+      alert.error("Microphone not available");
+      return;
+    }
+    const chunks = [];
+    const recorder = new MediaRecorder(audioStreamRef.current);
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      setWhisperStatus("stopped");
+      setWhisperUploading(true);
+      const formdata = new FormData();
+      formdata.append("audio", blob);
+      formdata.append("auth", authRef.current);
+      formdata.append("question", buzzedQuestionRef.current);
+      formdata.append("round", buzzedRoundRef.current);
+      try {
+        const response = await axios.post(
+          urlsRef.current["socket_flask"] + "/audioanswerupload",
+          formdata,
+          { headers: { "content-type": "multipart/form-data" } }
+        );
+        const transcription = response.data["transcription"] || "";
+        console.log("[Whisper] transcription:", transcription);
+        if (transcription) props.setAnswer(transcription);
+        socketRef.current.emit("audioanswer", {
+          auth: authRef.current,
+          filename: response.data["filename"],
+          transcription,
+        });
+      } catch (e) {
+        console.error("[Whisper] upload error", e);
+        alert.error("Whisper submission failed");
+      }
+      setWhisperUploading(false);
+    };
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    setWhisperStatus("recording");
+  }
+
+  function whisperStop() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+      setWhisperStatus("stopping");
+    }
+  }
 
   function buzzin() {
+    buzzedQuestionRef.current = props.question;
+    buzzedRoundRef.current = props.state.round;
     props.buzz();
     setTimeout(()=>{textAnswer.current.focus();}, 100);
   }
@@ -176,6 +243,8 @@ function AnswerBox(props) {
         const formdata = new FormData();
         formdata.append("audio", blob);
         formdata.append("auth", authtoken);
+        formdata.append("question", buzzedQuestionRef.current);
+        formdata.append("round", buzzedRoundRef.current);
 
         console.log(blob);
         const url = window.URL.createObjectURL(blob);
@@ -186,24 +255,7 @@ function AnswerBox(props) {
         document.body.appendChild(a);
         a.click();
 
-        const config = {
-          headers: { "content-type": "multipart/form-data" },
-        };
-
-        //POST TO CLASSIFIER SERVER
-        // const response = 
-        await axios
-          .post(urls["socket_flask"] + "/audioanswerupload", formdata, config)
-          .then((response) => {
-            console.log(response);
-            socket.emit("audioanswer", {
-              auth: authtoken,
-              filename: response.data["filename"], // CHANGE
-            });
-          })
-          .catch(() => {
-            alert.error("Classification submission failed");
-          });
+        // Whisper mode handles upload separately via stopWhisperRecording
       } else {
         complete(answer);
       }
@@ -218,6 +270,9 @@ function AnswerBox(props) {
 
   // On question change reset ASR
   useEffect(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
     resetForNewQuestion();
     setIsReady(!(speechMode > 0));
     const readyTO = setTimeout(() => {
@@ -234,8 +289,9 @@ function AnswerBox(props) {
   //   console.log(timeLeft, processingAudio, status, listening);
   // }, [timeLeft, processingAudio, status, listening])
 
-  // On speech mode change update if ASR is ready
+  // On speech mode change update if ASR is ready, and keep ref current
   useEffect(()=> {
+    speechModeRef.current = speechMode;
     setIsReady(speechMode > 0);
     // eslint-disable-next-line
   },[speechMode]);
@@ -256,10 +312,11 @@ function AnswerBox(props) {
   }, [ready, manager, startListening]);
 
   useEffect(() => {
-    if(props.buzzer !== username) {
+    if(props.buzzer !== username && !whisperUploading && whisperStatus === "idle") {
       props.setAnswer("");
     }
-  }, [props,username])
+    // eslint-disable-next-line
+  }, [props.buzzer, username, whisperUploading, whisperStatus])
 
   useEffect(()=> {
     console.log("IS LISTENING");
@@ -271,17 +328,19 @@ function AnswerBox(props) {
   useKeyPress(" ", buzzin, [], document.activeElement !== textAnswer.current);
 
   const [volume, setVolume] = useState(0);
-  
+
   useEffect(() => {
-    async function getVolume() {
+    let stream = null;
+    let audioContext = null;
+    let volumeInterval = null;
+
+    async function init() {
       try {
-        const audioStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true
-          }
-        });
-        const audioContext = new AudioContext();
-        const audioSource = audioContext.createMediaStreamSource(audioStream);
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
+        audioStreamRef.current = stream;
+
+        audioContext = new AudioContext();
+        const audioSource = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 512;
         analyser.minDecibels = -127;
@@ -289,30 +348,29 @@ function AnswerBox(props) {
         analyser.smoothingTimeConstant = 0.4;
         audioSource.connect(analyser);
         const volumes = new Uint8Array(analyser.frequencyBinCount);
-        const volumeCallback = () => {
+        volumeInterval = setInterval(() => {
           analyser.getByteFrequencyData(volumes);
           let volumeSum = 0;
-          for(const volume of volumes)
-            volumeSum += volume;
+          for (const v of volumes) volumeSum += v;
           setVolume(volumeSum / volumes.length);
-        };
-        const volumeInterval = setInterval(() => {
-          volumeCallback();
         }, 100);
-        return () => {
-          audioStream.getTracks().forEach(function(track) {
-            track.stop();
-          });
-          clearInterval(volumeInterval);
-        };
-      } catch(e) {
+      } catch (e) {
         setSpeechMode(0);
         console.error("Microphone not detected: ", e);
-        alert.error('Microphone not detected');
+        alertRef.current.error("Microphone not detected");
       }
     }
-    getVolume();
-  }, [alert]);
+
+    init();
+
+    return () => {
+      if (volumeInterval) clearInterval(volumeInterval);
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (audioContext) audioContext.close();
+      audioStreamRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div class="answerbox-answering-bigger-wrapper">
@@ -328,7 +386,7 @@ function AnswerBox(props) {
           autocomplete="off"
         />
         <div class="answerbox-switch-wrapper">
-          <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume}/>
+          <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume} canClassify={true}/>
         </div>
         
         {/* <div class="answerbox-switch-wrapper">
@@ -359,34 +417,48 @@ function AnswerBox(props) {
         <div class="answerbox-button" onClick={buzzin}>
           Buzz
         </div>
-        <div class="answerbox-button" onClick={submit1}>
-          Submit
-        </div>
+        {speechMode === 2 && (props.buzzer === username || whisperStatus === "recording" || whisperStatus === "stopping" || whisperUploading) ? (
+          <div
+            class="answerbox-button"
+            style={{"background-color": whisperStatus === "recording" ? "#e05050" : (whisperUploading || whisperStatus === "stopping") ? "#aaaaaa" : "#90E99C", cursor: (whisperUploading || whisperStatus === "stopping") ? "default" : "pointer"}}
+            onClick={(whisperUploading || whisperStatus === "stopping") ? undefined : (whisperStatus === "recording" ? whisperStop : (props.buzzer === username ? whisperStart : undefined))}
+          >
+            {whisperUploading ? "Transcribing..." : whisperStatus === "recording" ? "Stop & Transcribe" : whisperStatus === "stopping" ? "Stopping..." : "Start Recording"}
+          </div>
+        ) : (
+          <div class="answerbox-button" onClick={submit1}>
+            Submit
+          </div>
+        )}
       </div>
-      {(['recording', 'stopping'].includes(status) || processingAudio) &&
+      {speechMode === 2 && (whisperStatus === "recording" || whisperUploading) &&
+        <div className="answerbox-asr-progressbar-wrapper">
+          <ProgressBar now={100} variant={"danger"} striped={true} animated={true} label={whisperUploading ? "Transcribing..." : "Recording..."}/>
+        </div>
+      }
+      {speechMode !== 2 && (['recording', 'stopping'].includes(status) || processingAudio) &&
         <div className="answerbox-asr-progressbar-wrapper">
           <ProgressBar now={timeLeft/6000*100} variant={"danger"} striped={true} animated={true} label={(!processingAudio ? "Listening..." : "Processing...")}/>
         </div>
       }
-      
+
       {speechMode === 1 &&
         <div class="answerbox-answering-voice-instructions">
           Speech Recognition: Say
-          <div class="answerbox-answering-voice-instructions-highlight">Go</div> 
+          <div class="answerbox-answering-voice-instructions-highlight">Go</div>
           to begin,
-          <div class="answerbox-answering-voice-instructions-highlight">Stop</div>  
-          for the transcript, press 
+          <div class="answerbox-answering-voice-instructions-highlight">Stop</div>
+          for the transcript, press
           <div class="answerbox-answering-voice-instructions-btn-highlight">Submit</div>
           to submit
         </div>
       }
       {speechMode === 2 &&
         <div class="answerbox-answering-voice-instructions">
-          Classifier: Say 
-          <div class="answerbox-answering-voice-instructions-highlight">Go</div> 
-          to begin recording audio, say  
-          <div class="answerbox-answering-voice-instructions-highlight">Stop</div>  
-          to submit and classify (judge via audio)
+          Whisper: Buzz in → click
+          <div class="answerbox-answering-voice-instructions-btn-highlight">Start Recording</div>
+          → speak → click
+          <div class="answerbox-answering-voice-instructions-btn-highlight">Stop &amp; Transcribe</div>
         </div>
       }
     </div>
