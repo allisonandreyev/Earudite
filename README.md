@@ -1,48 +1,80 @@
-# ASRQA_Interface
+# Earudite
 
-This repository contains all the components needed to run the Earudite platform. In summary, Earudite is a platform designed to crowdsource the collection of training data using Quiz bowl questions to improve automatic speech recognition systems.
+Earudite is a platform designed to crowdsource the collection of ASR (Automatic Speech Recognition) training data using Quiz Bowl-style gameplay. Users record themselves reading questions aloud and answer questions by voice, generating labeled audio data.
 
-## Installation
+## Components
 
-To install this repository, simply clone it into your directory of choice using the following command:
-```bash
-$ git clone https://github.com/saptab/ASRQA_Interface.git
-```
-Then, follow the installation instructions in the README for each sub-repository. The HLS server component requires no additional installation steps aside from generating a secure handshake.
+| Component | Tech | Port | Description |
+|---|---|---|---|
+| `browser-asr` | React/TypeScript | 3000 | Frontend UI |
+| `quizzr-server` | Python/Flask (gunicorn) | 5110 | Data flow server: question selection, audio pre-screening, user auth, leaderboards |
+| `quizzr-socket-server` | Python/Flask-SocketIO | 4000 | Real-time game server: lobbies, matchmaking, game state, audio classification |
+| `server` | Node.js/Express | 8700 | Proxy + frontend host |
+| `hls` | Python/Flask | 4440 | HLS audio streaming server |
+
+## Prerequisites
+
+- **Python environment:** `/opt/anaconda3/envs/earudite/` (Python 3.11)
+- **MongoDB Atlas** connection string (ask a team member)
+- **Firebase credentials:** `quizzr-server/instance/secrets/firebase_storage_key.json` (Firebase project: `earudite-5aa9e`)
+- **Node.js** for the `server` component
 
 ## Running
 
-Prior to running the platform, make sure that each reference uses the same port for a given component. Use the following ports:
-* HLS: 4440
-* Data Flow Server: 5110
-* Socket Server: 6470
-* Frontend + Proxy: 8700
-* Internal MongoDB Port (if MongoDB is run locally): 27019
+All three backend services must use `nohup` with log redirection — the process suspends otherwise.
 
-The following series of commands shows how to run the platform:
+Replace `<CONNECTION_STRING>` with the MongoDB Atlas connection string and `<FIREBASE_KEY_PATH>` with the absolute path to `quizzr-server/instance/secrets/firebase_storage_key.json`.
+
+### 1. Data Flow Server (quizzr-server)
+
 ```bash
-$ cd ASRQA_Interface/server
-$ module load nodejs
-$ module load ffmpeg
-$ npx pm2 start server.js --name ASRQA -o ./out.log -e ./err.log
-$ npx pm2 save --force
-$ export Q_INST_PATH=/fs/clip-quiz/saptab1/ASRQA/ASRQA_Interface/quizzr-server
-$ export CONNECTION_STRING=<DATA-FLOW-SERVER-CONNECTION-STRING>
-$ cd ../quizzr-socket-server/
-$ nohup nice python main-with-arg.py > MMMDD_log.txt &
-$ cd ../quizzr-server/
-$ nohup nice python server.py > MMMDD_log.txt &
-$ cd ../hls/
-$ nohup nice ./Go-HLS-Streamer --config hls.yaml serve > MMMDD_log.txt &
+cd quizzr-server
+CONNECTION_STRING="<CONNECTION_STRING>" nohup /opt/anaconda3/envs/earudite/bin/gunicorn \
+  -w 4 -b 0.0.0.0:5110 "server:create_app()" >> /tmp/quizzr_server.log 2>&1 &
 ```
-Replace `<DATA-FLOW-SERVER-CONNECTION-STRING>` with the connection string discussed in [quizzr-server/README.md](quizzr-server/README.md) and `MMMDD` with the current month and day. Example: `May21`.
+
+### 2. HLS Streaming Server
+
+```bash
+cd hls
+CONNECTION_STRING="<CONNECTION_STRING>" nohup /opt/anaconda3/envs/earudite/bin/python3.11 \
+  hls_server.py >> /tmp/hls_server.log 2>&1 &
+```
+
+### 3. Socket Server (quizzr-socket-server)
+
+```bash
+cd quizzr-socket-server
+nohup /opt/anaconda3/envs/earudite/bin/python3.11 main.py \
+  --socketport 4000 \
+  --secretpath "<FIREBASE_KEY_PATH>" \
+  --hlsurl "http://localhost:4440" \
+  --backendurl "http://localhost:5110" \
+  --whispermodel base >> /tmp/socket_server.log 2>&1 &
+```
+
+### 4. Proxy + Frontend Host (server)
+
+```bash
+cd server
+node server.js
+```
+
+### 5. Frontend (browser-asr)
+
+```bash
+cd browser-asr
+npm start
+```
+
+Open [http://localhost:3000](http://localhost:3000) to view the app.
+
+## Notes
+
+- **Audio source:** Audio clips come from the [Pinafore/audio\_data](https://github.com/Pinafore/audio_data) GitHub repo via `combined (1).json`. Audio is matched to questions by **question text** (exact/prefix match), not by `qb_id`.
+- **Stuck workers:** If quizzr-server becomes unresponsive, kill all workers with `lsof -ti :5110 | xargs kill -9` and restart.
+- **Log files:** `/tmp/quizzr_server.log`, `/tmp/hls_server.log`, `/tmp/socket_server.log`
 
 ## Project Team Members
 
-Saptarashmi Bandyopadhyay
-
-Shivam Malhotra
-
-Andrew Chen
-
-Christopher Rapp
+Saptarashmi Bandyopadhyay, Shivam Malhotra, Andrew Chen, Christopher Rapp
