@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head><title>Mic Test</title></head>
+<body>
+<button onclick="test()">Test Mic</button>
+<pre id="out"></pre>
+<script>
+async function test() {
+  const out = document.getElementById('out');
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(d => d.kind === 'audioinput');
+    out.textContent = 'Audio inputs found: ' + inputs.length + '\n';
+    inputs.forEach(d => out.textContent += d.label + ' (' + d.deviceId.slice(0,8) + ')\n');
+    out.textContent += '\nCalling getUserMedia...\n';
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    out.textContent += 'SUCCESS! Tracks: ' + stream.getAudioTracks().map(t => t.label).join(', ');
+    stream.getTracks().forEach(t => t.stop());
+  } catch(e) {
+    out.textContent += 'ERROR: ' + e.name + ': ' + e.message;
+  }
+}
+</script>
+</body>
+</html>

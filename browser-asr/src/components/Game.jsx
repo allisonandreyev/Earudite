@@ -423,6 +423,7 @@ function Game() {
 
   // ANSWER BOX
   const [answerText, setAnswerText] = useState("");
+  const [lastSubmittedAnswer, setLastSubmittedAnswer] = useState("");
 
   useEffect(() => {
     const buzzerListener = (data) => {
@@ -477,6 +478,7 @@ function Game() {
       setRid(data["rid"]);
       setClassifiable(data["classifiable"]);
       setAnswerText("");
+      setLastSubmittedAnswer("");
       setTotalTimeBeenSet(false);
     };
 
@@ -572,6 +574,7 @@ function Game() {
 
   function answer(txt) {
     // console.log("answered",txt);
+    setLastSubmittedAnswer(txt);
     state.socket.emit("answer", {
       auth: authtoken,
       answer: txt,
@@ -703,7 +706,13 @@ function Game() {
               buzzer={state.buzzer}
               buzzTime={state.buzzTime}
             />
-            {state.prevAnswers.length > 0 && 
+            {lastSubmittedAnswer && (
+              <div className="game-team-wrapper game-team-standings game-submitted-answer-panel">
+                <div className="game-team-title">Your answer</div>
+                <div className="game-submitted-answer-text">{lastSubmittedAnswer}</div>
+              </div>
+            )}
+            {state.prevAnswers.length > 0 &&
               <PreviousAnswers answers={state.prevAnswers}/>
             }
           </div>

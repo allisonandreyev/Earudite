@@ -50,7 +50,7 @@ function VoiceButton(props) {
   function handleChange() {
     if(props.canClassify) props.setMode(m => ((m+1)%3));
     else props.setMode(m => ((m+1)%2));
-    
+
     if(props.mode === 0) { // off
 
     } else if(props.mode === 1) { // ASR
@@ -85,7 +85,7 @@ function VoiceButton(props) {
       </div>
     )
   }
-  
+
 }
 
 // async function initialize2(foo, foo2) {
@@ -329,7 +329,10 @@ function AnswerBox(props) {
 
   const [volume, setVolume] = useState(0);
 
+  const voiceActive = speechMode > 0;
   useEffect(() => {
+    if (!voiceActive) return;
+
     let stream = null;
     let audioContext = null;
     let volumeInterval = null;
@@ -357,7 +360,7 @@ function AnswerBox(props) {
       } catch (e) {
         setSpeechMode(0);
         console.error("Microphone not detected: ", e);
-        alertRef.current.error("Microphone not detected");
+        alertRef.current.error("Microphone: " + (e.name || e.message || "not detected"));
       }
     }
 
@@ -370,7 +373,7 @@ function AnswerBox(props) {
       audioStreamRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [voiceActive]);
 
   return (
     <div class="answerbox-answering-bigger-wrapper">
@@ -388,7 +391,7 @@ function AnswerBox(props) {
         <div class="answerbox-switch-wrapper">
           <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume} canClassify={true}/>
         </div>
-        
+
         {/* <div class="answerbox-switch-wrapper">
           <Tooltip
             // options
