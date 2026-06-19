@@ -101,7 +101,7 @@ function AnswerBox(props) {
   const authtoken = useRecoilValue(AUTHTOKEN);
   const alert = useAlert();
   const socket = useRecoilValue(SOCKET);
-  const [speechMode, setSpeechMode] = useState(0);
+  const [speechMode, setSpeechMode] = useState(2);
   const speechModeRef = useRef(0);
 
   const [whisperUploading, setWhisperUploading] = useState(false);

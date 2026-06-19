@@ -348,11 +348,24 @@
   padding: 0.75rem;
 }
 
+.game-submitted-answer-row {
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem 0;
+}
+
+.game-submitted-answer-label {
+  font-size: 0.75rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.1rem;
+}
+
 .game-submitted-answer-text {
   font-weight: bold;
   font-size: 1rem;
   color: #333;
-  padding: 0.25rem 0;
 }
 
 .game-keybinds-card-wrapper {

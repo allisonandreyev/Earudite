@@ -424,6 +424,7 @@ function Game() {
   // ANSWER BOX
   const [answerText, setAnswerText] = useState("");
   const [lastSubmittedAnswer, setLastSubmittedAnswer] = useState("");
+  const [lastAnswerCorrect, setLastAnswerCorrect] = useState(null);
 
   useEffect(() => {
     const buzzerListener = (data) => {
@@ -458,15 +459,11 @@ function Game() {
       if(state.questionTime > gameSettings['post_buzz_time']) {
         video.play();
       }
-      // console.log(data);
-      // this.setBuzzTime(time);
-      // TODO correct animation
+      setLastAnswerCorrect(false);
     };
 
     const answeredCorrectlyListener = (data) => {
-      // console.log(data);
-      // this.setBuzzTime(time);
-      // TODO correct animation
+      setLastAnswerCorrect(true);
     };
 
     const hlsListener = (data) => {
@@ -479,6 +476,7 @@ function Game() {
       setClassifiable(data["classifiable"]);
       setAnswerText("");
       setLastSubmittedAnswer("");
+      setLastAnswerCorrect(null);
       setTotalTimeBeenSet(false);
     };
 
@@ -708,13 +706,32 @@ function Game() {
             />
             {lastSubmittedAnswer && (
               <div className="game-team-wrapper game-team-standings game-submitted-answer-panel">
-                <div className="game-team-title">Your answer</div>
-                <div className="game-submitted-answer-text">{lastSubmittedAnswer}</div>
+                <div className="game-submitted-answer-row">
+                  <span className="game-submitted-answer-label">Your answer:</span>
+                  <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
+                </div>
+                {(() => {
+                  if (lastAnswerCorrect === true) {
+                    return (
+                      <div className="game-submitted-answer-row">
+                        <span className="game-submitted-answer-label">Correct answer:</span>
+                        <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
+                      </div>
+                    );
+                  }
+                  const lastTrue = [...state.prevAnswers].reverse().find(([, correct]) => correct);
+                  if (lastTrue) {
+                    return (
+                      <div className="game-submitted-answer-row">
+                        <span className="game-submitted-answer-label">Correct answer:</span>
+                        <span className="game-submitted-answer-text">{lastTrue[0]}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
             )}
-            {state.prevAnswers.length > 0 &&
-              <PreviousAnswers answers={state.prevAnswers}/>
-            }
           </div>
         </div>
       </React.Fragment>
