@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useOnlineAnswering } from "asr-answering";
 import MicOffIcon from "@material-ui/icons/MicOff";
 import { useRecoilValue } from "recoil";
-import { AUTHTOKEN, PROFILE, URLS, SOCKET } from "../store";
+import { PROFILE, SOCKET } from "../store";
 import { useAlert } from "react-alert";
-import axios from "axios";
 import { ProgressBar } from "react-bootstrap";
 import "../pkg/StackedProgressBar.css";
 import "../styles/AnswerBox.css";
@@ -50,14 +49,6 @@ function VoiceButton(props) {
   function handleChange() {
     if(props.canClassify) props.setMode(m => ((m+1)%3));
     else props.setMode(m => ((m+1)%2));
-
-    if(props.mode === 0) { // off
-
-    } else if(props.mode === 1) { // ASR
-
-    } else { // mode === 2, classifier
-
-    }
   }
 
   if(props.mode === 0) {
@@ -88,115 +79,80 @@ function VoiceButton(props) {
 
 }
 
-// async function initialize2(foo, foo2) {
-//   await foo().then(() => {foo2();});
-// }
+function downsampleTo16k(buffer, fromRate) {
+  if (fromRate === 16000) return new Float32Array(buffer);
+  const ratio = fromRate / 16000;
+  const out = new Float32Array(Math.round(buffer.length / ratio));
+  for (let i = 0; i < out.length; i++) out[i] = buffer[Math.round(i * ratio)];
+  return out;
+}
 
-
-// Hook for the answer box at the bottom of all games
 function AnswerBox(props) {
   const profile = useRecoilValue(PROFILE);
   const username = profile["username"];
-  const urls = useRecoilValue(URLS);
-  const authtoken = useRecoilValue(AUTHTOKEN);
   const alert = useAlert();
   const socket = useRecoilValue(SOCKET);
   const [speechMode, setSpeechMode] = useState(2);
-  const speechModeRef = useRef(0);
+  const speechModeRef = useRef(2);
 
-  const [whisperUploading, setWhisperUploading] = useState(false);
-  const [whisperStatus, setWhisperStatus] = useState("idle");
-  const authRef = useRef(authtoken);
-  const urlsRef = useRef(urls);
   const socketRef = useRef(socket);
   const alertRef = useRef(alert);
-  useEffect(() => { authRef.current = authtoken; }, [authtoken]);
-  useEffect(() => { urlsRef.current = urls; }, [urls]);
   useEffect(() => { socketRef.current = socket; }, [socket]);
   useEffect(() => { alertRef.current = alert; }, [alert]);
 
-  const audioStreamRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
+  const lastBuzzDetectRef = useRef(0);
 
-  // ASR always picks up the wake word, this function removes it
+  const audioStreamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const audioSourceRef = useRef(null);
+  const processorRef = useRef(null);
+  const buzzerRef = useRef(props.buzzer);
+  const answerRef = useRef(props.answer);
+  const actionRef = useRef({});
+  useEffect(() => { buzzerRef.current = props.buzzer; }, [props.buzzer]);
+  useEffect(() => { answerRef.current = props.answer; }, [props.answer]);
+
   function complete(answer) {
     props.setAnswer(answer.substr(answer.indexOf(" ") + 1).replace("stop", ""));
   }
 
-  // Sets answer when typed
   function setAnswer2(event) {
     props.setAnswer(event.target.value);
   }
 
   const textAnswer = useRef(null);
-  const buzzedQuestionRef = useRef(props.question);
-  const buzzedRoundRef = useRef(props.state.round);
-
-  function whisperStart() {
-    if (!audioStreamRef.current) {
-      alert.error("Microphone not available");
-      return;
-    }
-    const chunks = [];
-    const recorder = new MediaRecorder(audioStreamRef.current);
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.onstop = async () => {
-      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-      setWhisperStatus("stopped");
-      setWhisperUploading(true);
-      const formdata = new FormData();
-      formdata.append("audio", blob);
-      formdata.append("auth", authRef.current);
-      formdata.append("question", buzzedQuestionRef.current);
-      formdata.append("round", buzzedRoundRef.current);
-      try {
-        const response = await axios.post(
-          urlsRef.current["socket_flask"] + "/audioanswerupload",
-          formdata,
-          { headers: { "content-type": "multipart/form-data" } }
-        );
-        const transcription = response.data["transcription"] || "";
-        console.log("[Whisper] transcription:", transcription);
-        if (transcription) props.setAnswer(transcription);
-        socketRef.current.emit("audioanswer", {
-          auth: authRef.current,
-          filename: response.data["filename"],
-          transcription,
-        });
-      } catch (e) {
-        console.error("[Whisper] upload error", e);
-        alert.error("Whisper submission failed");
-      }
-      setWhisperUploading(false);
-    };
-    recorder.start();
-    mediaRecorderRef.current = recorder;
-    setWhisperStatus("recording");
-  }
-
-  function whisperStop() {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
-      setWhisperStatus("stopping");
-    }
-  }
 
   function buzzin() {
-    buzzedQuestionRef.current = props.question;
-    buzzedRoundRef.current = props.state.round;
     props.buzz();
-    setTimeout(()=>{textAnswer.current.focus();}, 100);
+    setTimeout(()=>{ if (textAnswer.current) textAnswer.current.focus(); }, 100);
   }
 
-  // useEffect(()=> {
-  //   console.log(props.answer);
-  // },[props.answer]);
-
-  function submit1() {
-    console.log(props.answer);
-    props.submit(props.answer);
+  function submit1(textOverride) {
+    const answer = textOverride !== undefined ? textOverride : props.answer;
+    console.log(answer);
+    props.submit(answer);
     props.setAnswer("");
   }
+
+  // Strip the word "submit" from Whisper output, return cleaned text + whether to submit
+  function processTranscription(text) {
+    const hasSubmit = /\bsubmit\b/i.test(text);
+    const cleaned = text.replace(/\bsubmit\b/gi, '').replace(/\s+/g, ' ').trim();
+    return { cleaned, hasSubmit };
+  }
+
+  actionRef.current.buzzin = buzzin;
+  actionRef.current.submit1 = submit1;
+
+  // After each Whisper answer update, scroll the input to show the newest text
+  // and move the cursor to the end. useLayoutEffect runs after the DOM is updated
+  // but before the browser paints, so scrollLeft is set on the correct layout.
+  useLayoutEffect(() => {
+    const el = textAnswer.current;
+    if (!el || props.buzzer !== username) return;
+    el.scrollLeft = el.scrollWidth;
+    try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {}
+  }, [props.answer, props.buzzer, username]);
 
   const {
     initialize,
@@ -237,46 +193,31 @@ function AnswerBox(props) {
     },
     onAudioData: () => {},
     timeout: 6000,
-    isReady: (speechMode > 0),
-    onComplete: async (answer, blob) => {
-      if (speechMode === 2) {
-        const formdata = new FormData();
-        formdata.append("audio", blob);
-        formdata.append("auth", authtoken);
-        formdata.append("question", buzzedQuestionRef.current);
-        formdata.append("round", buzzedRoundRef.current);
-
-        console.log(blob);
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.style.display = "none";
-        a.href = url;
-        a.download = "test.wav";
-        document.body.appendChild(a);
-        a.click();
-
-        // Whisper mode handles upload separately via stopWhisperRecording
-      } else {
-        complete(answer);
-      }
+    isReady: (speechMode === 1),
+    onComplete: (answer) => {
+      if (speechMode === 1) complete(answer);
     },
     gameTime: 9000000,
     onBuzzin: () => buzzin(),
     ASRthreshold: 0.8,
     onSubmit: () => {
-      submit1();
+      if (speechMode === 1) submit1();
     }
   });
 
-  // On question change reset ASR
+  // On question change: reset server buffer and ASR state
   useEffect(() => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
+    if (speechModeRef.current === 2) {
+      socketRef.current.emit('reset_audio_stream', {});
+    } else if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+      socketRef.current.emit('stop_audio_stream', {});
     }
     resetForNewQuestion();
-    setIsReady(!(speechMode > 0));
+    setIsReady(false);
     const readyTO = setTimeout(() => {
-      setIsReady(speechMode > 0);
+      setIsReady(speechModeRef.current === 1);
     }, 100);
 
     return () => {
@@ -285,14 +226,23 @@ function AnswerBox(props) {
     // eslint-disable-next-line
   }, [props.question]);
 
-  // useEffect(() => {
-  //   console.log(timeLeft, processingAudio, status, listening);
-  // }, [timeLeft, processingAudio, status, listening])
-
-  // On speech mode change update if ASR is ready, and keep ref current
+  // Sync speechMode into ref and update hook readiness
   useEffect(()=> {
     speechModeRef.current = speechMode;
-    setIsReady(speechMode > 0);
+    setIsReady(speechMode === 1);
+
+    // Start or stop the PCM stream based on mode
+    if (speechMode === 2) {
+      if (audioContextRef.current && audioSourceRef.current && !processorRef.current) {
+        startPCMStream();
+      }
+    } else {
+      if (processorRef.current) {
+        processorRef.current.disconnect();
+        processorRef.current = null;
+        socketRef.current.emit('stop_audio_stream', {});
+      }
+    }
     // eslint-disable-next-line
   },[speechMode]);
 
@@ -303,20 +253,18 @@ function AnswerBox(props) {
     // eslint-disable-next-line
   }, [props.state.inGame])
 
-  // Start listening and reset stage when ready
+  // Start listening and reset stage when ready (mode 1 only)
   useEffect(() => {
-    if(ready) {
+    if(ready && speechMode === 1) {
       manager.resetStage();
       startListening();
     }
-  }, [ready, manager, startListening]);
+  }, [ready, manager, startListening, speechMode]);
 
   useEffect(() => {
-    if(props.buzzer !== username && !whisperUploading && whisperStatus === "idle") {
-      props.setAnswer("");
-    }
+    if (props.buzzer !== "" && props.buzzer !== username) props.setAnswer("");
     // eslint-disable-next-line
-  }, [props.buzzer, username, whisperUploading, whisperStatus])
+  }, [props.buzzer, username])
 
   useEffect(()=> {
     console.log("IS LISTENING");
@@ -324,10 +272,79 @@ function AnswerBox(props) {
     // eslint-disable-next-line
   },[]);
 
+  // In Whisper mode: reset server buffer on buzz-in so answer transcription starts fresh;
+  // on buzz-out, finalize the buffer then immediately restart for keyword detection.
+  useEffect(() => {
+    if (speechMode !== 2) return;
+    if (props.buzzer === username) {
+      socketRef.current.emit('reset_audio_stream', {});
+    } else {
+      socketRef.current.emit('stop_audio_stream', {});
+      socketRef.current.emit('start_audio_stream', {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.buzzer, username, speechMode]);
+
+  // Whisper partial transcription: update answer box when buzzed in, detect "buzz" keyword otherwise
+  useEffect(() => {
+    const handler = ({ text }) => {
+      if (!text) return;
+      if (buzzerRef.current === username) {
+        const { cleaned, hasSubmit } = processTranscription(text);
+        props.setAnswer(cleaned);
+        if (hasSubmit) actionRef.current.submit1(cleaned);
+      } else if (buzzerRef.current === '') {
+        // Only fire on a short, clearly intentional utterance (≤3 words, whole word
+        // "buzz"). Immediately reset the server buffer so the old "buzz" audio can't
+        // re-trigger after the cooldown expires.
+        const words = text.trim().toLowerCase().split(/\s+/);
+        const now = Date.now();
+        if (
+          words.length <= 3 &&
+          words.some(w => /^buzz[.!?]?$/.test(w)) &&
+          now - lastBuzzDetectRef.current > 2000
+        ) {
+          lastBuzzDetectRef.current = now;
+          socketRef.current.emit('reset_audio_stream', {});
+          actionRef.current.buzzin();
+        }
+      }
+    };
+    socket.on('partial_transcription', handler);
+    return () => socket.off('partial_transcription', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, username]);
+
+  // Final full-buffer transcription after buzz-out
+  useEffect(() => {
+    const handler = ({ text }) => {
+      if (!text || buzzerRef.current !== username) return;
+      const { cleaned, hasSubmit } = processTranscription(text);
+      props.setAnswer(cleaned);
+      if (hasSubmit) actionRef.current.submit1(cleaned);
+    };
+    socket.on('final_transcription', handler);
+    return () => socket.off('final_transcription', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, username]);
+
   useKeyPress("Enter", submit1, [props.answer], true);
   useKeyPress(" ", buzzin, [], document.activeElement !== textAnswer.current);
 
   const [volume, setVolume] = useState(0);
+
+  function startPCMStream() {
+    const ctx = audioContextRef.current;
+    socketRef.current.emit('start_audio_stream', {});
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processor.onaudioprocess = (e) => {
+      const pcm = downsampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate);
+      socketRef.current.emit('audio_chunk', pcm.buffer);
+    };
+    audioSourceRef.current.connect(processor);
+    processor.connect(ctx.destination);
+    processorRef.current = processor;
+  }
 
   const voiceActive = speechMode > 0;
   useEffect(() => {
@@ -344,6 +361,14 @@ function AnswerBox(props) {
 
         audioContext = new AudioContext();
         const audioSource = audioContext.createMediaStreamSource(stream);
+        audioContextRef.current = audioContext;
+        audioSourceRef.current = audioSource;
+
+        // In Whisper mode, start PCM streaming immediately for keyword detection
+        if (speechModeRef.current === 2) {
+          startPCMStream();
+        }
+
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 512;
         analyser.minDecibels = -127;
@@ -368,9 +393,13 @@ function AnswerBox(props) {
 
     return () => {
       if (volumeInterval) clearInterval(volumeInterval);
+      if (processorRef.current) { processorRef.current.disconnect(); processorRef.current = null; }
+      socketRef.current.emit('stop_audio_stream', {});
       if (stream) stream.getTracks().forEach((t) => t.stop());
       if (audioContext) audioContext.close();
       audioStreamRef.current = null;
+      audioContextRef.current = null;
+      audioSourceRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceActive]);
@@ -392,51 +421,16 @@ function AnswerBox(props) {
           <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume} canClassify={true}/>
         </div>
 
-        {/* <div class="answerbox-switch-wrapper">
-          <Tooltip
-            // options
-            title="Use voice commands"
-            position="top"
-            trigger="mouseenter"
-            unmountHTMLWhenHide="true"
-          >
-            <VoiceBuzzSwitch setVoice={setReady2} />
-          </Tooltip>
-          {ready && props.classifiable && (
-            <div>
-              <Tooltip
-                // options
-                title="Use classifier"
-                position="top"
-                trigger="mouseenter"
-                unmountHTMLWhenHide="true"
-              >
-                <UseClassifierSwitch setVoice={setUseClassifier} />
-              </Tooltip>
-            </div>
-          )}
-        </div> */}
-
         <div class="answerbox-button" onClick={buzzin}>
           Buzz
         </div>
-        {speechMode === 2 && (props.buzzer === username || whisperStatus === "recording" || whisperStatus === "stopping" || whisperUploading) ? (
-          <div
-            class="answerbox-button"
-            style={{"background-color": whisperStatus === "recording" ? "#e05050" : (whisperUploading || whisperStatus === "stopping") ? "#aaaaaa" : "#90E99C", cursor: (whisperUploading || whisperStatus === "stopping") ? "default" : "pointer"}}
-            onClick={(whisperUploading || whisperStatus === "stopping") ? undefined : (whisperStatus === "recording" ? whisperStop : (props.buzzer === username ? whisperStart : undefined))}
-          >
-            {whisperUploading ? "Transcribing..." : whisperStatus === "recording" ? "Stop & Transcribe" : whisperStatus === "stopping" ? "Stopping..." : "Start Recording"}
-          </div>
-        ) : (
-          <div class="answerbox-button" onClick={submit1}>
-            Submit
-          </div>
-        )}
+        <div class="answerbox-button" onClick={submit1}>
+          Submit
+        </div>
       </div>
-      {speechMode === 2 && (whisperStatus === "recording" || whisperUploading) &&
+      {speechMode === 2 && props.buzzer === username &&
         <div className="answerbox-asr-progressbar-wrapper">
-          <ProgressBar now={100} variant={"danger"} striped={true} animated={true} label={whisperUploading ? "Transcribing..." : "Recording..."}/>
+          <ProgressBar now={100} variant={"danger"} striped={true} animated={true} label="Listening..."/>
         </div>
       }
       {speechMode !== 2 && (['recording', 'stopping'].includes(status) || processingAudio) &&
@@ -458,10 +452,8 @@ function AnswerBox(props) {
       }
       {speechMode === 2 &&
         <div class="answerbox-answering-voice-instructions">
-          Whisper: Buzz in → click
-          <div class="answerbox-answering-voice-instructions-btn-highlight">Start Recording</div>
-          → speak → click
-          <div class="answerbox-answering-voice-instructions-btn-highlight">Stop &amp; Transcribe</div>
+          Say <div class="answerbox-answering-voice-instructions-highlight">"buzz"</div> or click Buzz → speak → click
+          <div class="answerbox-answering-voice-instructions-btn-highlight">Submit</div>
         </div>
       }
     </div>

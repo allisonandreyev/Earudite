@@ -18,7 +18,8 @@ import json
 import string
 from flask_cors import CORS
 import operator
-import whisper
+import numpy as np
+from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 CORS(app)
@@ -27,6 +28,15 @@ app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY")
 socketio = SocketIO(app, cors_allowed_origins="*", logger=True)
 
 whisper_model = None  # loaded lazily on first request or at startup via --whispermodel arg
+
+# Per-socket streaming buffers for live transcription
+audio_buffers = {}       # sid -> np.ndarray (float32, 16 kHz)
+partial_transcribing = set()  # sids whose transcription is currently in flight
+last_transcription_time = {}  # sid -> float (epoch seconds of last partial transcription kick-off)
+STREAM_SAMPLE_RATE = 16000
+MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # start after 0.5 s of audio
+STREAM_WINDOW_SAMPLES = int(1.5 * STREAM_SAMPLE_RATE)  # only transcribe the last 1.5 s (low-latency window)
+STREAM_INTERVAL_S = 0.5  # minimum seconds between partial transcription kicks
 
 # SHARED BETWEEN THREADS
 current_lobby = {}  # UID : room name
@@ -401,8 +411,91 @@ def user_disconnected():
     emit('alert', ['show', str(username) + ' left the lobby'], to=lobby)
 
 def _run_whisper(audio_path):
-    result = whisper_model.transcribe(audio_path, language="en")
-    return result["text"].strip()
+    segments, _ = whisper_model.transcribe(audio_path, language="en")
+    return " ".join(seg.text for seg in segments).strip()
+
+
+def _run_whisper_array(audio_array):
+    segments, _ = whisper_model.transcribe(
+        audio_array,
+        language="en",
+        vad_filter=True,               # skip silence — much faster
+        condition_on_previous_text=False,  # avoid hallucinating from prior context
+    )
+    return " ".join(seg.text for seg in segments).strip()
+
+
+# Socket.IO live streaming handlers
+@socketio.on('start_audio_stream')
+def start_audio_stream(data):
+    audio_buffers[request.sid] = np.array([], dtype=np.float32)
+
+
+@socketio.on('audio_chunk')
+def handle_audio_chunk(data):
+    sid = request.sid
+    if sid not in audio_buffers:
+        return
+    chunk = np.frombuffer(data, dtype=np.float32)
+    audio_buffers[sid] = np.concatenate([audio_buffers[sid], chunk])
+
+    now = time.time()
+    since_last = now - last_transcription_time.get(sid, 0)
+    if len(audio_buffers[sid]) < MIN_STREAM_SAMPLES or sid in partial_transcribing or since_last < STREAM_INTERVAL_S:
+        return
+
+    partial_transcribing.add(sid)
+    last_transcription_time[sid] = now
+    # Transcribe the full buffer so the answer box grows incrementally instead of
+    # showing rolling 1.5-s fragments. Cap at 10 s to bound Whisper latency.
+    full = audio_buffers[sid]
+    MAX_PARTIAL_SAMPLES = int(10 * STREAM_SAMPLE_RATE)
+    buf = full[-MAX_PARTIAL_SAMPLES:].copy() if len(full) > MAX_PARTIAL_SAMPLES else full.copy()
+
+    def do_transcription(buf, target_sid):
+        try:
+            if whisper_model is None:
+                return
+            text = eventlet.tpool.execute(_run_whisper_array, buf)
+            if text:
+                socketio.emit('partial_transcription', {'text': text}, to=target_sid)
+        except Exception as e:
+            print("Streaming transcription error:", e)
+        finally:
+            partial_transcribing.discard(target_sid)
+
+    eventlet.spawn(do_transcription, buf, sid)
+
+
+@socketio.on('reset_audio_stream')
+def reset_audio_stream(data):
+    """Clear the buffer without triggering final transcription (used on buzz-in and question change)."""
+    sid = request.sid
+    audio_buffers[sid] = np.array([], dtype=np.float32)
+    last_transcription_time.pop(sid, None)
+    partial_transcribing.discard(sid)
+
+
+@socketio.on('stop_audio_stream')
+def stop_audio_stream(data):
+    sid = request.sid
+    buf = audio_buffers.pop(sid, None)
+    partial_transcribing.discard(sid)
+    last_transcription_time.pop(sid, None)
+
+    # Final transcription of full buffer — sent back so client can auto-submit
+    if buf is None or len(buf) < MIN_STREAM_SAMPLES or whisper_model is None:
+        return
+
+    def do_final(buf, target_sid):
+        try:
+            text = eventlet.tpool.execute(_run_whisper_array, buf)
+            if text:
+                socketio.emit('final_transcription', {'text': text}, to=target_sid)
+        except Exception as e:
+            print("Final transcription error:", e)
+
+    eventlet.spawn(do_final, buf, sid)
 
 
 @app.route('/audioanswerupload', methods=['POST'])
@@ -510,7 +603,7 @@ if __name__ == '__main__':
     os.environ["SOCKET_PORT"] = str(args.socketport)
 
     print(f"Loading Whisper model '{args.whispermodel}'...")
-    whisper_model = whisper.load_model(args.whispermodel)
+    whisper_model = WhisperModel(args.whispermodel, device="cpu", compute_type="int8")
     print("Whisper model loaded.")
     eventlet.spawn(emit_game_state)
     eventlet.spawn(emit_lobby_state)
