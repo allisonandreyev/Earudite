@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 # from secrets import token_urlsafe
 from uuid import uuid4
 
+import gridfs
 import pyAesCrypt
 import pymongo
 from pymongo import UpdateOne
@@ -53,6 +54,9 @@ class QuizzrTPM:
         self.bucket = storage.bucket()
 
         self.database: Database = self.mongodb_client.get_database(database_name)
+
+        # GridFS bucket for storing audio blobs directly in MongoDB (replaces dead Firebase Storage)
+        self.fs = gridfs.GridFS(self.database, collection="AudioBlobs")
 
         self.users: Collection = self.database.Users
         self.rec_questions: Collection = self.database.RecordedQuestions
@@ -215,6 +219,48 @@ class QuizzrTPM:
         #     errs.append(("internal_error", f"user_update_failure_x{missed_results}"))
         errs += [("internal_error", "user_update_failure")] * missed_results
         return errs
+
+    def store_answer_audio(self, wav_bytes: bytes, metadata: dict) -> str:
+        """
+        Store a game answer/buzz recording's WAV bytes in GridFS and its metadata in the Audio collection.
+
+        :param wav_bytes: The raw bytes of the WAV file
+        :param metadata: The recording metadata (recType, userId, qb_id, transcript, correct, expectedAnswer, ...)
+        :return: The generated audio ID (also the GridFS file _id and the Audio document _id)
+        """
+        audio_id = str(uuid4())
+        self.fs.put(
+            wav_bytes,
+            _id=audio_id,
+            filename=audio_id + ".wav",
+            contentType="audio/wav",
+            recType=metadata.get("recType"),
+        )
+        entry = {"_id": audio_id, "version": self.config["VERSION"]}
+        for k, v in metadata.items():
+            if not k.startswith("__"):
+                entry[k] = v
+        self.audio.insert_one(entry)
+        self.logger.info(f"Stored answer recording '{audio_id}' in GridFS + Audio collection")
+
+        uid = metadata.get("userId")
+        if uid:
+            self.add_rec_to_user(uid, {"id": audio_id, "recType": metadata.get("recType", "answer")})
+        return audio_id
+
+    def get_gridfs_audio(self, audio_id: str):
+        """
+        Retrieve a GridFS-stored audio blob as an in-memory bytes buffer.
+
+        :param audio_id: The audio ID (GridFS file _id)
+        :return: An io.BytesIO handle positioned at the start, or None if the blob is not in GridFS
+        """
+        if not self.fs.exists(audio_id):
+            return None
+        grid_out = self.fs.get(audio_id)
+        fh = io.BytesIO(grid_out.read())
+        fh.seek(0)
+        return fh
 
     def get_file_blob(self, blob_path: str):
         """
@@ -444,34 +490,35 @@ class QuizzrTPM:
 
     def upload_many(self, file_paths: List[str], subdir: str) -> Dict[str, str]:
         """
-        Upload multiple encrypted audio files to Firebase Cloud Storage, located at ``<BLOB_ROOT>/<subdir>/``.
+        Store multiple audio files in MongoDB GridFS (``AudioBlobs`` collection). The returned blob name (a UUID) is
+        used as the GridFS file ``_id`` so it matches the ``_id`` inserted into the Audio/UnprocessedAudio collections,
+        letting ``get_audio()`` serve the bytes back via ``get_gridfs_audio()``.
+
+        (Previously uploaded encrypted blobs to Firebase Cloud Storage, whose bucket is now dead.)
 
         :param file_paths: The paths of the files to upload
-        :param subdir: The subdirectory to put the files in
+        :param subdir: The subdirectory the recording belongs to (kept for metadata compatibility)
         :return: A dictionary mapping file names to blob names
         """
-        # TODO: Actual BrokenPipeError handling
         file2blob = {}
 
-        self.logger.info(f"Uploading {len(file_paths)} file(s)...")
+        self.logger.info(f"Storing {len(file_paths)} file(s) in GridFS...")
         upload_count = 0
         for file_path in file_paths:
             file_name = os.path.basename(file_path)
-            file_path_aes = file_path + ".aes"
-            # with open(file_path, "rb") as f:
-            #     in_bytesio = io.BytesIO(f.read())
-            # out_bytesio = io.BytesIO()
-            pyAesCrypt.encryptFile(file_path, file_path_aes, os.environ["DF_SERVER_AUDIO_PSWD"], AES_BUFFER_SIZE)
-            # pyAesCrypt.encryptStream(in_bytesio, out_bytesio, os.environ["DF_SERVER_AUDIO_PSWD"], AES_BUFFER_SIZE)
+            with open(file_path, "rb") as f:
+                wav_bytes = f.read()
             blob_name = str(uuid4())
-            blob_path = self.get_blob_path(blob_name, subdir)
-            blob = self.bucket.blob(blob_path)
-            blob.upload_from_filename(file_path_aes)
-            # out_bytesio.seek(0)  # Reset BytesIO to beginning
-            # blob.upload_from_file(out_bytesio)
+            self.fs.put(
+                wav_bytes,
+                _id=blob_name,
+                filename=blob_name + ".wav",
+                contentType="audio/wav",
+                subdir=subdir,
+            )
             file2blob[file_name] = blob_name
-            self.logger.debug(f"{upload_count}/{len(file_paths)}")
             upload_count += 1
+            self.logger.debug(f"{upload_count}/{len(file_paths)}")
 
         return file2blob
 

@@ -100,7 +100,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         # "DIFFICULTY_LIMITS": [3, 6, None],
         "DIFFICULTY_DIST": [0.6, 0.3, 0.1],
         "VERSION": "0.2.0",
-        "MIN_ANSWER_SIMILARITY": 50,
+        "MIN_ANSWER_SIMILARITY": 85,
         "PROC_CONFIG": {
             "checkUnk": True,
             "unkToken": "<unk>",
@@ -823,6 +823,11 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         :param audio_id: The ID of the audio file to retrieve
         :return: A response containing the bytes of the audio file
         """
+        # Newer recordings (e.g. game answers) are stored directly in GridFS — serve those first.
+        gridfs_file = qtpm.get_gridfs_audio(audio_id)
+        if gridfs_file is not None:
+            return send_file(gridfs_file, mimetype="audio/wav")
+
         audio_doc = qtpm.audio.find_one({"_id": audio_id})
 
         if _query_flag("batch") and "batchUUID" in audio_doc:
@@ -866,6 +871,66 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             abort(HTTPStatus.UNAUTHORIZED)
 
         return get_audio(audio_id)
+
+    @app.route("/game_answer_audio", methods=["POST"])
+    def game_answer_audio():
+        """
+        Store a single game answer recording (WAV) directly in GridFS and the Audio collection.
+
+        Intended to be called by the socket server, which already holds the streamed audio buffer,
+        the question ID, the transcript, and the correctness verdict. Unlike ``/audio POST`` this is
+        not rate-limited (game answers occur more frequently) and skips the Firebase/AES path.
+
+        :return: A dictionary with the created audio ID and a status code
+        """
+        decoded = _verify_id_token()
+        user_id = decoded["uid"]
+
+        # Respect bans / consent, same as the /audio POST path
+        _block_users(user_id)
+
+        recording = request.files.get("audio")
+        if not recording:
+            return _make_err_response(
+                "Argument 'audio' is undefined",
+                "undefined_arg",
+                HTTPStatus.BAD_REQUEST,
+                ["audio"],
+                True
+            )
+
+        metadata = {"recType": "answer", "userId": user_id}
+
+        qb_id = request.form.get("qb_id")
+        if qb_id:
+            try:
+                metadata["qb_id"] = int(qb_id)
+            except (TypeError, ValueError):
+                app.logger.warning(f"Ignoring non-integer qb_id '{qb_id}'")
+
+        transcript = request.form.get("transcript")
+        if transcript:
+            metadata["transcript"] = transcript
+
+        expected_answer = request.form.get("expectedAnswer")
+        if expected_answer:
+            metadata["expectedAnswer"] = expected_answer
+
+        correct = request.form.get("correct")
+        if correct is not None:
+            metadata["correct"] = str(correct).lower() == "true"
+
+        wav_bytes = recording.read()
+        if not wav_bytes:
+            return _make_err_response(
+                "Received empty audio file",
+                "empty_audio",
+                HTTPStatus.BAD_REQUEST,
+                log_msg=True
+            )
+
+        audio_id = qtpm.store_answer_audio(wav_bytes, metadata)
+        return {"audioId": audio_id}, HTTPStatus.CREATED
 
     @app.delete("/audio/<audio_id>")
     def delete_audio(audio_id):

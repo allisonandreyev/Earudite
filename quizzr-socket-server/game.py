@@ -121,6 +121,7 @@ class Game:
             self.question = 1  # current question
             self.buzzer = ""  # username of person who buzzed
             self.prev_answers = []
+            self.last_answer_meta = None  # {qid, correct, answer, username} of the most recent answer() call
             self.points = {}
             if self.teams == 0:
                 for player in self.players:
@@ -313,6 +314,13 @@ class Game:
             # buzz may have timed out during the HTTP request (gamestate clears active_buzz)
             if not self.active_buzz[0]:
                 return False
+            # Record metadata for the socket server to attach to the uploaded answer audio
+            self.last_answer_meta = {
+                "qid": self.answering_ids[self.round - 1][self.question - 1],
+                "correct": correct,
+                "answer": answer,
+                "username": username,
+            }
             print(
                 "qb_id for current question: "
                 + str(self.answering_ids[self.round - 1][self.question - 1])

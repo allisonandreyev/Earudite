@@ -41,7 +41,7 @@ THE SOFTWARE.
 '''
 
 
-def get_forced_alignment(speech_file: str, transcript: str) -> gentle.Transcription:
+def get_forced_alignment(speech_file: str, transcript: str):
     """
     Run a forced alignment using Gentle and return the result as a gentle.Transcription object
 
@@ -59,6 +59,12 @@ def get_forced_alignment(speech_file: str, transcript: str) -> gentle.Transcript
     disfluency = False
     conservative = False
     disfluencies = {'uh', 'um'}
+
+    # Callers must skip forced alignment when gentle is unavailable (see
+    # QuizzrProcessor.get_accuracy_and_vtt). Gentle's Transcription objects can't be reconstructed
+    # without the library, so there is no meaningful fallback here.
+    if gentle is None:
+        raise RuntimeError("gentle is not installed; forced alignment is unavailable")
 
     logging.info("Retrieving forced alignment...")
 

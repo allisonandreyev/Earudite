@@ -11,6 +11,8 @@ import random
 from nonsocketfunctions import lobbycode_generator, cache_user, get_user
 from firebase_admin import auth, initialize_app
 import os
+import io
+import wave
 import threading
 import requests
 import time
@@ -337,9 +339,22 @@ def answer(json, methods=['GET', 'POST']):
     username = user['username']
     lobby = current_lobby[user['username']]
 
+    # Snapshot the streamed answer audio before game.answer() yields to eventlet
+    sid = request.sid
+    buf = audio_buffers.get(sid)
+    answer_audio = buf.copy() if buf is not None and len(buf) > 0 else None
+    auth_token = json['auth']
+
     answered = games[lobby].answer(username, json['answer'])
     if not answered:
         emit('alert', ['error', "You can't answer right now"])
+        return
+
+    # Upload the answer recording to the shared DB (GridFS) via the backend
+    meta = games[lobby].last_answer_meta
+    if answer_audio is not None and meta is not None and len(answer_audio) >= MIN_STREAM_SAMPLES:
+        wav_bytes = _pcm_to_wav_bytes(answer_audio)
+        eventlet.spawn(_upload_answer_audio, wav_bytes, auth_token, meta)
 
 
 # Socket endpoint for giving vote feedback
@@ -423,6 +438,40 @@ def _run_whisper_array(audio_array):
         condition_on_previous_text=False,  # avoid hallucinating from prior context
     )
     return " ".join(seg.text for seg in segments).strip()
+
+
+def _pcm_to_wav_bytes(pcm, rate=STREAM_SAMPLE_RATE):
+    """Encode a float32 [-1, 1] PCM numpy array into 16-bit mono WAV bytes."""
+    clipped = np.clip(pcm, -1.0, 1.0)
+    int16 = (clipped * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(int16.tobytes())
+    return buf.getvalue()
+
+
+def _upload_answer_audio(wav_bytes, auth_token, meta):
+    """POST a game answer recording to the backend for storage in the shared DB (GridFS)."""
+    try:
+        files = {"audio": ("answer.wav", wav_bytes, "audio/wav")}
+        data = {
+            "qb_id": str(meta.get("qid", "")),
+            "transcript": meta.get("answer", ""),
+            "correct": "true" if meta.get("correct") else "false",
+        }
+        resp = requests.post(
+            os.environ.get("BACKEND_URL") + "/game_answer_audio",
+            files=files,
+            data=data,
+            headers={"Authorization": auth_token},
+            timeout=30,
+        )
+        print(f"Answer audio upload -> {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print("Answer audio upload failed:", e)
 
 
 # Socket.IO live streaming handlers

@@ -485,6 +485,21 @@ class QuizzrProcessor:
         :param r_transcript: The transcript to use as a reference
         :return: A tuple containing the accuracy and the VTT
         """
+        # When Gentle (the forced aligner) isn't installed, skip alignment entirely and accept the
+        # recording with a simple evenly-spaced VTT. Gentle's Transcription/Word objects can't be
+        # reconstructed without the library, so there is nothing to realign.
+        if forced_alignment.gentle is None:
+            transcript_words = r_transcript.split()
+            num_words = len(transcript_words)
+            duration = self.get_duration_from_path(file_path)
+            per_word = (duration / num_words) if num_words else 0.0
+            vtt = "WEBVTT Kind: captions; Language: en"
+            for i, w in enumerate(transcript_words):
+                start = vtt_conversion.seconds_to_vtt_timestamp(i * per_word)
+                end = vtt_conversion.seconds_to_vtt_timestamp((i + 1) * per_word)
+                vtt += f"\n\n{start} --> {end}\n<v Speaker 0>{w}"
+            return num_words, num_words, vtt
+
         alignment = forced_alignment.get_forced_alignment(file_path, r_transcript)
         words = alignment.words
         total_words = len(words)
@@ -532,9 +547,20 @@ class QuizzrProcessor:
         :return: The duration of the associated WAV file in seconds
         """
         submission_path = os.path.join(self.DIRECTORY, submission) + ".wav"
-        with closing(wave.open(submission_path, "r")) as f:
-            duration = f.getnframes() / f.getframerate()
-        return duration
+        return self.get_duration_from_path(submission_path)
+
+    def get_duration_from_path(self, wav_path: str) -> float:
+        """
+        Get the duration of a WAV file in seconds given its full path.
+
+        :param wav_path: The path to the WAV file (with extension)
+        :return: The duration in seconds, or 0.0 if it cannot be read
+        """
+        try:
+            with closing(wave.open(wav_path, "r")) as f:
+                return f.getnframes() / f.getframerate()
+        except (wave.Error, EOFError, FileNotFoundError):
+            return 0.0
 
     def standardize_audio(self, file_path: str):
         """
