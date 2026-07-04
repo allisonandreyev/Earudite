@@ -294,14 +294,16 @@ function AnswerBox(props) {
         props.setAnswer(cleaned);
         if (hasSubmit) actionRef.current.submit1(cleaned);
       } else if (buzzerRef.current === '') {
-        // Only fire on a short, clearly intentional utterance (≤3 words, whole word
-        // "buzz"). Immediately reset the server buffer so the old "buzz" audio can't
-        // re-trigger after the cooldown expires.
+        // Detect the "buzz" keyword in the most recent speech. Partial transcriptions
+        // cover the full accumulated buffer (up to 10 s), so checking the whole text's
+        // word count never matches mid-question — only inspect the last few words.
+        // Immediately reset the server buffer so the old "buzz" audio can't re-trigger
+        // after the cooldown expires.
         const words = text.trim().toLowerCase().split(/\s+/);
+        const recent = words.slice(-3);
         const now = Date.now();
         if (
-          words.length <= 3 &&
-          words.some(w => /^buzz[.!?]?$/.test(w)) &&
+          recent.some(w => /^buzz[.!?]?$/.test(w)) &&
           now - lastBuzzDetectRef.current > 2000
         ) {
           lastBuzzDetectRef.current = now;

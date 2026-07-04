@@ -144,6 +144,12 @@ function Leaderboards() {
                         }
                     }
                     setRank(rank1+1);
+                })
+                .catch(function () {
+                    // No data for this view (e.g. missing monthly archive) — show empty, not "Failed"
+                    setLeaderboards([]);
+                    setScreen("home");
+                    clearTimeout(TO);
                 });
         } else if(topic === "recording") {
             setScreen("loading");
@@ -166,6 +172,12 @@ function Leaderboards() {
                         }
                     }
                     setRecordingRank(rank1+1);
+                })
+                .catch(function () {
+                    // No data for this view (e.g. missing monthly archive) — show empty, not "Failed"
+                    setRecordingLeaderboards([]);
+                    setScreen("home");
+                    clearTimeout(TO);
                 });
         }
     }, [alert, profile._id, topic, urls, selectedMonth, selectedYear]);
@@ -197,7 +209,8 @@ function Leaderboards() {
                     }
                 }
                 setRank(rank1+1);
-            });
+            })
+            .catch(function () { setLeaderboards([]); });
         const audioLeaderboard = axios.get(audioUrl)
             .then(function (response) {
                 setRecordingLeaderboards(response.data.results);
@@ -209,14 +222,17 @@ function Leaderboards() {
                     }
                 }
                 setRecordingRank(rank1+1);
-            });
-        
+            })
+            .catch(function () { setRecordingLeaderboards([]); });
+
         const archiveSummaryPromise = axios.get(urls['dataflow'] + '/leaderboard/archive/summary')
             .then(function (response) {
                 setArchiveSummary(response.data.summary);
-            });
+            })
+            .catch(function () {});
 
-        Promise.all([gameplayLeaderboard, audioLeaderboard, archiveSummaryPromise]).then(() => {
+        // .finally so a failed/empty request still resolves the screen instead of the 5s "Failed" timeout
+        Promise.all([gameplayLeaderboard, audioLeaderboard, archiveSummaryPromise]).finally(() => {
             setScreen("home");
             clearTimeout(TO);
         });
