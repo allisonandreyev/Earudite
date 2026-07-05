@@ -1746,13 +1746,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             projection={"leaderboard": 1}
         )
         if not leaderboard:
-            return _make_err_response(
-                "Could not find leaderboard",
-                "not_found",
-                HTTPStatus.NOT_FOUND,
-                [year, month],
-                True
-            )
+            return {"results": []}
 
         return {"results": leaderboard["leaderboard"]}
 
@@ -1790,13 +1784,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             projection={"leaderboard": 1}
         )
         if not leaderboard:
-            return _make_err_response(
-                "Could not find leaderboard",
-                "not_found",
-                HTTPStatus.NOT_FOUND,
-                [year, month],
-                True
-            )
+            return {"results": []}
 
         return {"results": leaderboard["leaderboard"]}
 

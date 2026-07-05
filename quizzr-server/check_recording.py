@@ -1,10 +1,18 @@
 """Quick check: did my recording reach the shared MongoDB Atlas database?
+<<<<<<< Updated upstream
 Run:  CONNECTION_STRING="mongodb+srv://..." /opt/anaconda3/envs/earudite/bin/python3.11 check_recording.py
 """
 import os
 import pymongo
 
 CONN = os.environ["CONNECTION_STRING"]
+=======
+Run:  /opt/anaconda3/envs/earudite/bin/python3.11 check_recording.py
+"""
+import pymongo
+
+CONN = "mongodb+srv://dbPyServer:wGiP5iWRTvNwjapB@cluster0.qd4eu.mongodb.net/"
+>>>>>>> Stashed changes
 db = pymongo.MongoClient(CONN)["QuizzrDatabase"]
 
 print("UnprocessedAudio docs:", db["UnprocessedAudio"].count_documents({}))
