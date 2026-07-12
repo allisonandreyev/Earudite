@@ -78,4 +78,3 @@ Open [http://localhost:3000](http://localhost:3000) to view the app.
 ## Project Team Members
 
 Saptarashmi Bandyopadhyay, Shivam Malhotra, Andrew Chen, Christopher Rapp
-hi

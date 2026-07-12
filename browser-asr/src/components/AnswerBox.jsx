@@ -426,7 +426,7 @@ function AnswerBox(props) {
         <div class="answerbox-button" onClick={buzzin}>
           Buzz
         </div>
-        <div class="answerbox-button" onClick={submit1}>
+        <div class="answerbox-button" onClick={() => submit1()}>
           Submit
         </div>
       </div>
