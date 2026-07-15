@@ -16,6 +16,8 @@ import Shop from './Shop.jsx';
 import Play from './Play.jsx';
 import Leaderboards from './Leaderboards.jsx';
 import CreateAccount from './CreateAccount.jsx';
+import AiModelLeaderboard from './AiModelLeaderboard.jsx';
+import ModelPreferences from './ModelPreferences.jsx';
 
 // ASSETS
 import HelpOutlineIcon from '@material-ui/icons/HelpOutline';
@@ -26,6 +28,8 @@ import SportsEsportsIcon from '@material-ui/icons/SportsEsports';
 import ExitToAppIcon from '@material-ui/icons/ExitToApp';
 import EmojiEventsIcon from '@material-ui/icons/EmojiEvents';
 import MicIcon from '@material-ui/icons/Mic';
+import MemoryIcon from '@material-ui/icons/Memory';
+import TuneIcon from '@material-ui/icons/Tune';
 
 // // Currency
 // import EnergyIcon from '../assets/energy.png';
@@ -173,6 +177,8 @@ function Sidenav(props) {
                 <SidenavItem label="Play" icon={<SportsEsportsIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(3); document.location.hash = "play";}} textColor={MainColor}/>
                 <SidenavItem label="Record" icon={<MicIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(4); document.location.hash = "record";}} textColor={MainColor}/>
                 <SidenavItem label="Leaderboards" icon={<EmojiEventsIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(5); document.location.hash = "leaderboards";}} textColor={MainColor}/>
+                <SidenavItem label="AI Models" icon={<MemoryIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(9); document.location.hash = "ai-leaderboard";}} textColor={MainColor}/>
+                <SidenavItem label="Model Prefs" icon={<TuneIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(10); document.location.hash = "model-preferences";}} textColor={MainColor}/>
                 <SidenavItem label="Logout" icon={<ExitToAppIcon style={{color: LogoutColor}}/>} textColor={LogoutColor} setScreen={() => firebase.auth().signOut()}/>
             </div>
         </div>
@@ -289,6 +295,10 @@ function BigWhitePanel() {
                 setScreen(4);
             } else if (windowhash === "leaderboards") {
                 setScreen(5);
+            } else if (windowhash === "ai-leaderboard") {
+                setScreen(9);
+            } else if (windowhash === "model-preferences") {
+                setScreen(10);
             } else if (windowhash === "tutorial") {
                 setScreen(8);
             } else {
@@ -532,6 +542,40 @@ function BigWhitePanel() {
                             <PageHeader title="Leaderboards" caption="Check out the top players across the globe!"/>
                             <div class="page-body-content-wrapper">
                                 <Leaderboards/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <TutorialBtn2/>
+            </div>
+        );
+    } else if(screen === 9) { // AI model leaderboard (mock)
+        return (
+            <div class="big-white-panel-wrapper">
+                <div class="big-white-panel">
+                    <div class="content-wrapper">
+                        <Sidenav setScreen={setScreen}/>
+                        <div class="page-body-wrapper">
+                            <PageHeader title="AI Model Leaderboard" caption="See how ASR models stack up on transcription accuracy!"/>
+                            <div class="page-body-content-wrapper">
+                                <AiModelLeaderboard/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <TutorialBtn2/>
+            </div>
+        );
+    } else if(screen === 10) { // model preferences
+        return (
+            <div class="big-white-panel-wrapper">
+                <div class="big-white-panel">
+                    <div class="content-wrapper">
+                        <Sidenav setScreen={setScreen}/>
+                        <div class="page-body-wrapper">
+                            <PageHeader title="Model Preferences" caption="Choose which ASR models Earudite uses for you!"/>
+                            <div class="page-body-content-wrapper">
+                                <ModelPreferences/>
                             </div>
                         </div>
                     </div>

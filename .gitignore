@@ -19,3 +19,6 @@ npm-debug.log*
 # Env
 .env.local
 .env.*.local
+
+# Local DB backups/exports — never commit raw dataset dumps
+backups/

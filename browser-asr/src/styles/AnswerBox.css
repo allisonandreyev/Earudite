@@ -38,6 +38,21 @@
     cursor: pointer;
 }
 
+.answerbox-asr-model-select {
+    margin-left: 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid #6287F7;
+    color: #6287F7;
+    font-size: 0.9rem;
+    padding: 0.15rem 0.4rem;
+    background-color: white;
+}
+
+.answerbox-asr-model-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .answerbox-answering-bigger-wrapper {
     display: flex;
     flex-direction: column;

@@ -1,5 +1,6 @@
 import { atom } from "recoil";
 import socketIOClient from "socket.io-client";
+import { DEFAULT_ASR_MODEL_ID } from "./asrModels";
 
 const URLS = atom({ // change to real URLS
     key: 'URLS',
@@ -113,8 +114,41 @@ const PREVSCREEN = atom({
     default: -1
 })
 
+// Persisted per-browser ASR model choices: which model to use when recording question readings
+// vs. transcribing spoken answers. Recoil in this project (0.3.1) predates atom effects, so
+// persistence is done by hand — seed the default from localStorage here, and call
+// saveModelPreferences() wherever the atom is updated so the two stay in sync.
+const MODEL_PREFERENCES_STORAGE_KEY = 'earudite_model_preferences';
+
+function loadModelPreferences() {
+    try {
+        const raw = window.localStorage.getItem(MODEL_PREFERENCES_STORAGE_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            return {
+                questionModel: parsed.questionModel || DEFAULT_ASR_MODEL_ID,
+                answerModel: parsed.answerModel || DEFAULT_ASR_MODEL_ID,
+            };
+        }
+    } catch (e) {
+        // malformed/inaccessible localStorage — fall back to defaults
+    }
+    return { questionModel: DEFAULT_ASR_MODEL_ID, answerModel: DEFAULT_ASR_MODEL_ID };
+}
+
+function saveModelPreferences(prefs: { questionModel: string, answerModel: string }) {
+    try {
+        window.localStorage.setItem(MODEL_PREFERENCES_STORAGE_KEY, JSON.stringify(prefs));
+    } catch (e) {
+        // localStorage unavailable — preference just won't survive a reload
+    }
+}
+
+const MODEL_PREFERENCES = atom({
+    key: 'MODEL_PREFERENCES',
+    default: loadModelPreferences()
+})
 
 
-
-export { URLS, AUDIO_BLOB, TEXT, SCREEN, PLAY_SCREEN, JOIN_CUSTOM_LOBBY_SCREEN, LOBBY_CODE, SOCKET, PLAYERS, PROFILE, TRANSCRIPTS, AUTHTOKEN, GAMESETTINGS, PREVSCREEN, INTERFACE_NAME }
+export { URLS, AUDIO_BLOB, TEXT, SCREEN, PLAY_SCREEN, JOIN_CUSTOM_LOBBY_SCREEN, LOBBY_CODE, SOCKET, PLAYERS, PROFILE, TRANSCRIPTS, AUTHTOKEN, GAMESETTINGS, PREVSCREEN, INTERFACE_NAME, MODEL_PREFERENCES, saveModelPreferences }
 

@@ -29,12 +29,52 @@ firebase_app = initialize_app()
 app.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY")
 socketio = SocketIO(app, cors_allowed_origins="*", logger=True)
 
-whisper_model = None  # loaded lazily on first request or at startup via --whispermodel arg
+# ASR model registry. Keyed by model id (what the client sends); each entry names an "engine"
+# so this isn't Whisper-specific — adding a non-Whisper model later (e.g. a HuggingFace one) is
+# a new entry here plus a new branch in _load_model(), not a rework of the routing below.
+MODEL_REGISTRY = {
+    "tiny":  {"engine": "faster_whisper", "size": "tiny"},
+    "base":  {"engine": "faster_whisper", "size": "base"},
+    "small": {"engine": "faster_whisper", "size": "small"},
+}
+DEFAULT_MODEL_ID = "base"
+
+_loaded_models = {}  # model id -> loaded model instance, filled in lazily
+_model_load_lock = threading.Lock()
+
+
+def _load_model(model_id):
+    """Load (or return the cached) model instance for a registry entry. Blocking — call off the
+    eventlet event loop (e.g. via eventlet.tpool.execute, or from inside a function that already
+    runs there)."""
+    entry = MODEL_REGISTRY[model_id]
+    if entry["engine"] == "faster_whisper":
+        return WhisperModel(entry["size"], device="cpu", compute_type="int8")
+    raise ValueError(f"Unsupported ASR engine '{entry['engine']}' for model '{model_id}'")
+
+
+def get_whisper_model(model_id):
+    """Return a cached model instance for model_id, loading it on first use. Falls back to the
+    default model id for anything not in the registry (unknown/missing client input)."""
+    if model_id not in MODEL_REGISTRY:
+        model_id = DEFAULT_MODEL_ID
+    if model_id in _loaded_models:
+        return _loaded_models[model_id]
+    with _model_load_lock:
+        if model_id not in _loaded_models:  # re-check: another greenthread may have loaded it while we waited
+            # flush explicitly — stdout is block-buffered under nohup, and a cold load (especially
+            # an uncached size, which downloads from Hugging Face Hub) can take a while
+            print(f"Loading ASR model '{model_id}'...", flush=True)
+            _loaded_models[model_id] = _load_model(model_id)
+            print(f"ASR model '{model_id}' loaded.", flush=True)
+        return _loaded_models[model_id]
+
 
 # Per-socket streaming buffers for live transcription
 audio_buffers = {}       # sid -> np.ndarray (float32, 16 kHz)
 partial_transcribing = set()  # sids whose transcription is currently in flight
 last_transcription_time = {}  # sid -> float (epoch seconds of last partial transcription kick-off)
+session_model = {}       # sid -> model id chosen at start_audio_stream time
 STREAM_SAMPLE_RATE = 16000
 MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # start after 0.5 s of audio
 STREAM_WINDOW_SAMPLES = int(1.5 * STREAM_SAMPLE_RATE)  # only transcribe the last 1.5 s (low-latency window)
@@ -408,6 +448,7 @@ def leaderboards(json, methods=['GET', 'POST']):
 
 @socketio.on('disconnect')
 def user_disconnected():
+    session_model.pop(request.sid, None)
     username = clients.get(request.sid)
     if username is None:
         return
@@ -425,13 +466,15 @@ def user_disconnected():
     emit('lobbystate', lobbies[lobby].state(), to=lobby)
     emit('alert', ['show', str(username) + ' left the lobby'], to=lobby)
 
-def _run_whisper(audio_path):
-    segments, _ = whisper_model.transcribe(audio_path, language="en")
+def _run_whisper(audio_path, model_id=DEFAULT_MODEL_ID):
+    model = get_whisper_model(model_id)  # lazy-load happens here, off the event loop (see call sites)
+    segments, _ = model.transcribe(audio_path, language="en")
     return " ".join(seg.text for seg in segments).strip()
 
 
-def _run_whisper_array(audio_array):
-    segments, _ = whisper_model.transcribe(
+def _run_whisper_array(audio_array, model_id=DEFAULT_MODEL_ID):
+    model = get_whisper_model(model_id)  # lazy-load happens here, off the event loop (see call sites)
+    segments, _ = model.transcribe(
         audio_array,
         language="en",
         vad_filter=True,               # skip silence — much faster
@@ -477,7 +520,11 @@ def _upload_answer_audio(wav_bytes, auth_token, meta):
 # Socket.IO live streaming handlers
 @socketio.on('start_audio_stream')
 def start_audio_stream(data):
-    audio_buffers[request.sid] = np.array([], dtype=np.float32)
+    sid = request.sid
+    audio_buffers[sid] = np.array([], dtype=np.float32)
+    # Model choice is locked in for the whole buzz-in — resolved once here rather than per
+    # chunk, so switching the dropdown mid-recording doesn't change models mid-utterance.
+    session_model[sid] = (data or {}).get('model') or DEFAULT_MODEL_ID
 
 
 @socketio.on('audio_chunk')
@@ -501,11 +548,11 @@ def handle_audio_chunk(data):
     MAX_PARTIAL_SAMPLES = int(10 * STREAM_SAMPLE_RATE)
     buf = full[-MAX_PARTIAL_SAMPLES:].copy() if len(full) > MAX_PARTIAL_SAMPLES else full.copy()
 
-    def do_transcription(buf, target_sid):
+    model_id = session_model.get(sid, DEFAULT_MODEL_ID)
+
+    def do_transcription(buf, target_sid, model_id):
         try:
-            if whisper_model is None:
-                return
-            text = eventlet.tpool.execute(_run_whisper_array, buf)
+            text = eventlet.tpool.execute(_run_whisper_array, buf, model_id)
             if text:
                 socketio.emit('partial_transcription', {'text': text}, to=target_sid)
         except Exception as e:
@@ -513,7 +560,7 @@ def handle_audio_chunk(data):
         finally:
             partial_transcribing.discard(target_sid)
 
-    eventlet.spawn(do_transcription, buf, sid)
+    eventlet.spawn(do_transcription, buf, sid, model_id)
 
 
 @socketio.on('reset_audio_stream')
@@ -533,18 +580,20 @@ def stop_audio_stream(data):
     last_transcription_time.pop(sid, None)
 
     # Final transcription of full buffer — sent back so client can auto-submit
-    if buf is None or len(buf) < MIN_STREAM_SAMPLES or whisper_model is None:
+    if buf is None or len(buf) < MIN_STREAM_SAMPLES:
         return
 
-    def do_final(buf, target_sid):
+    model_id = session_model.get(sid, DEFAULT_MODEL_ID)
+
+    def do_final(buf, target_sid, model_id):
         try:
-            text = eventlet.tpool.execute(_run_whisper_array, buf)
+            text = eventlet.tpool.execute(_run_whisper_array, buf, model_id)
             if text:
                 socketio.emit('final_transcription', {'text': text}, to=target_sid)
         except Exception as e:
             print("Final transcription error:", e)
 
-    eventlet.spawn(do_final, buf, sid)
+    eventlet.spawn(do_final, buf, sid, model_id)
 
 
 @app.route('/audioanswerupload', methods=['POST'])
@@ -571,11 +620,10 @@ def audioanswerupload():
 
     # transcribe with Whisper (run in thread pool so eventlet green threads aren't blocked)
     transcription = ""
-    if whisper_model is not None:
-        try:
-            transcription = eventlet.tpool.execute(_run_whisper, audio_path)
-        except Exception as e:
-            print("Whisper transcription error:", e)
+    try:
+        transcription = eventlet.tpool.execute(_run_whisper, audio_path)
+    except Exception as e:
+        print("Whisper transcription error:", e)
 
     print(f"Whisper transcribed '{filename}' as: {transcription!r}")
     response = jsonify({'filename': filename, 'transcription': transcription})
@@ -642,7 +690,7 @@ if __name__ == '__main__':
         dest="whispermodel",
         type=str,
         default="base",
-        help="Whisper model size: tiny, base, small, medium, large",
+        help="Default ASR model id to eager-load at startup (see MODEL_REGISTRY): tiny, base, small",
     )
     args = parser.parse_args()
     os.environ["HLS_HANDSHAKE"] = args.handshake
@@ -651,9 +699,12 @@ if __name__ == '__main__':
     os.environ["BACKEND_URL"] = args.backendurl
     os.environ["SOCKET_PORT"] = str(args.socketport)
 
-    print(f"Loading Whisper model '{args.whispermodel}'...")
-    whisper_model = WhisperModel(args.whispermodel, device="cpu", compute_type="int8")
-    print("Whisper model loaded.")
+    if args.whispermodel in MODEL_REGISTRY:
+        DEFAULT_MODEL_ID = args.whispermodel
+    else:
+        print(f"'{args.whispermodel}' is not in MODEL_REGISTRY {list(MODEL_REGISTRY)}; falling back to '{DEFAULT_MODEL_ID}'")
+    get_whisper_model(DEFAULT_MODEL_ID)  # eager-load the default so the first request isn't slow; tiny/base/small
+                                          # not chosen as default stay lazy until a client actually picks one
     eventlet.spawn(emit_game_state)
     eventlet.spawn(emit_lobby_state)
     eventlet.spawn(clean_lobbies_and_games)
