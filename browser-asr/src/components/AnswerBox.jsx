@@ -2,7 +2,8 @@ import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useOnlineAnswering } from "asr-answering";
 import MicOffIcon from "@material-ui/icons/MicOff";
 import { useRecoilValue } from "recoil";
-import { PROFILE, SOCKET } from "../store";
+import { PROFILE, SOCKET, MODEL_PREFERENCES } from "../store";
+import { ASR_MODELS } from "../asrModels";
 import { useAlert } from "react-alert";
 import { ProgressBar } from "react-bootstrap";
 import "../pkg/StackedProgressBar.css";
@@ -94,6 +95,14 @@ function AnswerBox(props) {
   const socket = useRecoilValue(SOCKET);
   const [speechMode, setSpeechMode] = useState(2);
   const speechModeRef = useRef(2);
+
+  // Quick per-session override of the saved answer-transcription model preference. Not
+  // persisted — it only affects this session; the saved default lives in MODEL_PREFERENCES
+  // and is edited from the Model Preferences page.
+  const modelPreferences = useRecoilValue(MODEL_PREFERENCES);
+  const [asrModel, setAsrModel] = useState(modelPreferences.answerModel);
+  const asrModelRef = useRef(asrModel);
+  useEffect(() => { asrModelRef.current = asrModel; }, [asrModel]);
 
   const socketRef = useRef(socket);
   const alertRef = useRef(alert);
@@ -280,7 +289,7 @@ function AnswerBox(props) {
       socketRef.current.emit('reset_audio_stream', {});
     } else {
       socketRef.current.emit('stop_audio_stream', {});
-      socketRef.current.emit('start_audio_stream', {});
+      socketRef.current.emit('start_audio_stream', { model: asrModelRef.current });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.buzzer, username, speechMode]);
@@ -337,7 +346,7 @@ function AnswerBox(props) {
 
   function startPCMStream() {
     const ctx = audioContextRef.current;
-    socketRef.current.emit('start_audio_stream', {});
+    socketRef.current.emit('start_audio_stream', { model: asrModelRef.current });
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = (e) => {
       const pcm = downsampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate);
@@ -422,6 +431,19 @@ function AnswerBox(props) {
         <div class="answerbox-switch-wrapper">
           <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume} canClassify={true}/>
         </div>
+        {speechMode === 2 &&
+          <select
+            class="answerbox-asr-model-select"
+            value={asrModel}
+            disabled={props.buzzer === username}
+            title="ASR model for this session (quick override — set your default on the Model Preferences page)"
+            onChange={(e) => setAsrModel(e.target.value)}
+          >
+            {ASR_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        }
 
         <div class="answerbox-button" onClick={buzzin}>
           Buzz

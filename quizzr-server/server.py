@@ -41,6 +41,7 @@ from werkzeug.exceptions import abort
 
 from ratelimiter import RateLimiter
 from mail_lib import Mailer
+import question_categories
 import rec_processing
 import sv_util
 from sv_api import QuizzrAPISpec
@@ -371,6 +372,10 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             expected_answers = request.form.getlist("expectedAnswer")
             transcripts = request.form.getlist("transcript")
             correct_flags = request.form.getlist("correct")
+            # ASR model the client used/preferred for this recording. Not transcribed against yet —
+            # tagged onto the metadata now so a future accuracy pipeline can find recordings by model
+            # without needing to reprocess anything.
+            preferred_models = request.form.getlist("preferredModel")
 
             _debug_variable("recordings", recordings)
             _debug_variable("qb_ids", qb_ids)
@@ -380,6 +385,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             _debug_variable("expected_answers", expected_answers)
             _debug_variable("transcripts", transcripts)
             _debug_variable("correct_flags", correct_flags)
+            _debug_variable("preferred_models", preferred_models)
 
             if not (len(recordings) == len(rec_types)
                     and (not qb_ids or len(recordings) == len(qb_ids))
@@ -387,7 +393,8 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                     and (not diarization_metadata_list or len(recordings) == len(diarization_metadata_list))
                     and (not expected_answers or len(recordings) == len(expected_answers))
                     and (not transcripts or len(recordings) == len(transcripts))
-                    and (not correct_flags or len(recordings) == len(correct_flags))):
+                    and (not correct_flags or len(recordings) == len(correct_flags))
+                    and (not preferred_models or len(recordings) == len(preferred_models))):
                 return _make_err_response(
                     "Received incomplete form batch",
                     "incomplete_batch",
@@ -396,7 +403,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                 )
 
             return pre_screen(recordings, rec_types, user_id, qb_ids, sentence_ids, diarization_metadata_list,
-                              expected_answers, transcripts, correct_flags)
+                              expected_answers, transcripts, correct_flags, preferred_models)
         elif request.method == "PATCH":
             abort(HTTPStatus.NOT_FOUND)
             # arguments_batch = request.get_json()
@@ -494,7 +501,8 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                    diarization_metadata_list: List[str] = None,
                    expected_answers: List[str] = None,
                    transcripts: List[str] = None,
-                   correct_flags: List[str] = None) -> Tuple[Union[dict, str], int]:
+                   correct_flags: List[str] = None,
+                   preferred_models: List[str] = None) -> Tuple[Union[dict, str], int]:
         """
         Submit one or more recordings for pre-screening and uploading.
 
@@ -509,6 +517,8 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         :param expected_answers: (optional) A list of the associated expected answers (for "answer" recordings)
         :param transcripts: (optional) A list of the associated output transcripts (for "answer" recordings)
         :param correct_flags: (optional) Whether each "answer" recording contains the correct answer
+        :param preferred_models: (optional) The ASR model id the client used/preferred for each recording. Stored
+                                 as-is on the metadata for later use; nothing currently reads it back.
         :return: A dictionary with the key "prescreenPointers" and a status code. If an error occurred, a string with a
                  status code is returned instead.
         """
@@ -526,6 +536,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             expected_answer = expected_answers[i] if len(expected_answers) > i else None
             transcript = transcripts[i] if len(transcripts) > i else None
             correct = correct_flags[i] if len(correct_flags) > i else None
+            preferred_model = preferred_models[i] if preferred_models and len(preferred_models) > i else None
 
             _debug_variable("qb_id", qb_id)
             _debug_variable("sentence_id", sentence_id)
@@ -592,6 +603,8 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                 metadata["transcript"] = transcript
             if correct:
                 metadata["correct"] = correct.lower() == "true"
+            if preferred_model:
+                metadata["preferredModel"] = preferred_model
 
             submissions.append((recording, metadata))
 
@@ -2197,14 +2210,26 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         _block_users()
         difficulty = request.args.get("difficultyType")
         batch_size = request.args.get("batchSize")
-        return pick_recording_question(int(difficulty) if difficulty else difficulty, int(batch_size or 1))
+        category = request.args.get("category")
+        if category and category not in question_categories.ALL_BUCKETS:
+            return _make_err_response(
+                f"Unknown category '{category}'",
+                "invalid_arg",
+                HTTPStatus.BAD_REQUEST,
+                ["category"],
+                True
+            )
+        return pick_recording_question(int(difficulty) if difficulty else difficulty, int(batch_size or 1), category)
 
-    def pick_recording_question(difficulty: int, batch_size: int):
+    def pick_recording_question(difficulty: int, batch_size: int, category: str = None):
         """
         Find a random unrecorded question (or multiple) and return the ID and transcript.
 
         :param difficulty: The difficulty type to use
         :param batch_size: The number of questions to retrieve
+        :param category: (optional) A category bucket name from question_categories.ALL_BUCKETS. When given,
+                         candidates are drawn from UnrecordedQuestions only (never RecordedQuestions — that
+                         collection is the Play-flow pool and is intentionally out of scope here).
         :return: A dictionary containing a list of "results" and "errors"
         """
         # if difficulty is not None:
@@ -2261,18 +2286,28 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             skip_unrec, limit_unrec = 0, 0
             skip_rec, limit_rec = 0, 0
 
-        # Get IDs for unrecorded questions
-        unrec_cursor = qtpm.unrec_questions.find(
-            query, {"qb_id": 1},
-            skip=skip_unrec, limit=limit_unrec, sort=[("recDifficulty", pymongo.ASCENDING)]
-        )
+        if category:
+            # Category-filtered requests are scoped to UnrecordedQuestions only — RecordedQuestions
+            # is the Play-flow pool and stays out of this entirely, regardless of difficulty banding.
+            category_query = {**query, **question_categories.category_to_mongo_filter(category)}
+            unrec_cursor = qtpm.unrec_questions.find(
+                category_query, {"qb_id": 1},
+                skip=skip_unrec, limit=limit_unrec, sort=[("recDifficulty", pymongo.ASCENDING)]
+            )
+            question_ids = list({doc["qb_id"] for doc in unrec_cursor})
+        else:
+            # Get IDs for unrecorded questions
+            unrec_cursor = qtpm.unrec_questions.find(
+                query, {"qb_id": 1},
+                skip=skip_unrec, limit=limit_unrec, sort=[("recDifficulty", pymongo.ASCENDING)]
+            )
 
-        rec_cursor = qtpm.rec_questions.find(
-            query, {"qb_id": 1},
-            skip=skip_rec, limit=limit_rec, sort=[("recDifficulty", pymongo.ASCENDING)]
-        )
+            rec_cursor = qtpm.rec_questions.find(
+                query, {"qb_id": 1},
+                skip=skip_rec, limit=limit_rec, sort=[("recDifficulty", pymongo.ASCENDING)]
+            )
 
-        question_ids = list({doc["qb_id"] for doc in chain(unrec_cursor, rec_cursor)})  # Ensure no duplicates are present
+            question_ids = list({doc["qb_id"] for doc in chain(unrec_cursor, rec_cursor)})  # Ensure no duplicates are present
         if not question_ids:
             return _make_err_response(
                 f"No questions found for difficulty type '{difficulty}'",
@@ -2292,7 +2327,13 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
 
         results = []
         for doc in next_questions:
-            result_doc = {"id": doc["qb_id"], "transcript": doc["transcript"], "recorded": bool(doc.get("recordings"))}
+            result_doc = {
+                "id": doc["qb_id"],
+                "transcript": doc["transcript"],
+                "recorded": bool(doc.get("recordings")),
+                "category": question_categories.bucket_for(doc),
+                "difficultyTier": question_categories.difficulty_tier_for(doc),
+            }
             if "sentenceId" in doc:
                 result_doc["sentenceId"] = doc["sentenceId"]
             if "tokenizations" in doc:

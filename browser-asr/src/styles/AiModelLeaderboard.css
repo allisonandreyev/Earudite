@@ -1,0 +1,12 @@
+.ai-model-leaderboard-mock-banner {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.5rem;
+    border-radius: 0.5rem;
+    background-color: #FFF1C2;
+    color: #7A5B00;
+    font-weight: 700;
+    font-size: 0.85rem;
+    text-align: center;
+}

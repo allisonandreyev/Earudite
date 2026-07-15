@@ -5,7 +5,8 @@ import { useAlert } from 'react-alert';
 import 'react-tippy/dist/tippy.css';
 import axios from 'axios';
 import { useRecoilState, useRecoilValue } from "recoil";
-import { TRANSCRIPTS, URLS } from "../store";
+import { TRANSCRIPTS, URLS, MODEL_PREFERENCES } from "../store";
+import { QUESTION_CATEGORIES, ANY_CATEGORY_ID } from "../questionCategories";
 import AudioRecorder from './AudioRecorder.jsx';
 
 
@@ -81,11 +82,13 @@ function Sentence(props) {
 function Shop() {
     const [shopScreen, setShopScreen] = useState("home");
     const [difficulty, setDifficulty] = useState("easy");
+    const [category, setCategory] = useState(ANY_CATEGORY_ID);
     const [transcripts, setTranscripts] = useRecoilState(TRANSCRIPTS);
     const alert = useAlert()
     const [transcript, setTranscript] = useState({"transcript": ""});
     const [audios, setAudios] = useState([]);
     const urls = useRecoilValue(URLS);
+    const modelPreferences = useRecoilValue(MODEL_PREFERENCES);
 
     function setAudio(index, audio) {
         let audiosCopy = [...audios];
@@ -102,22 +105,23 @@ function Shop() {
     function rerollTranscripts() {
         const prevScreen = (' ' + shopScreen).slice(1);;
         setShopScreen("loading");
+        const categoryParam = category === ANY_CATEGORY_ID ? "" : `&category=${encodeURIComponent(category)}`;
         let transcriptsArray = [[],[],[]];
         let requestsArray = [];
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=0')
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=0' + categoryParam)
                 .then(function (response) {
                     transcriptsArray[0].push(response['data']['results'][0]);
                 }));
         }
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=1')
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=1' + categoryParam)
                 .then(function (response) {
                     transcriptsArray[1].push(response['data']['results'][0]);
                 }));
         }
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=2')
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=2' + categoryParam)
                 .then(function (response) {
                     transcriptsArray[2].push(response['data']['results'][0]);
                 }));
@@ -157,6 +161,8 @@ function Shop() {
         const recTypes = Array.apply(null, Array(audios.length)).map(function () { return "normal"; });
         const sentenceIds = Array.apply(null, Array(audios.length)).map(function (x, i) { return i; });
         const diarMetadatas = Array.apply(null, Array(audios.length)).map(function () { return ""; });
+        // Not transcribed live — tagged so a future accuracy pipeline can find these by model.
+        const preferredModels = Array.apply(null, Array(audios.length)).map(function () { return modelPreferences.questionModel; });
         audios.forEach((element) => {
             formdata.append("audio", element);
         });
@@ -165,6 +171,9 @@ function Shop() {
         });
         recTypes.forEach((element) => {
             formdata.append("recType", element);
+        });
+        preferredModels.forEach((element) => {
+            formdata.append("preferredModel", element);
         });
         if(transcript.hasOwnProperty('sentenceId')) {
             sentenceIds.forEach((element) => {
@@ -202,6 +211,21 @@ function Shop() {
                 </div>
                 <div class="shop-title">Earn</div>
                 <div class="shop-title-divider"></div> */}
+                <div class="shop-category-picker-wrapper">
+                    <label class="shop-category-picker-label" for="shop-category-picker">
+                        Question category
+                    </label>
+                    <select
+                        id="shop-category-picker"
+                        class="shop-category-picker-select"
+                        value={category}
+                        onChange={(e) => setCategory(e.target.value)}
+                    >
+                        {QUESTION_CATEGORIES.map((c) => (
+                            <option key={c.id} value={c.id}>{c.label}</option>
+                        ))}
+                    </select>
+                </div>
                 <div class="shop-earn-wrapper">
                     
                     <div onClick={() => {activateShopScreen("easy")}} class="shop-earn-selector-wrapper shop-earn-selector-hvr-grow shop-earn-selector-easy">
