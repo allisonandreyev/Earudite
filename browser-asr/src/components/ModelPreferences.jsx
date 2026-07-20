@@ -4,6 +4,19 @@ import { useRecoilState } from "recoil";
 import { MODEL_PREFERENCES, saveModelPreferences } from "../store";
 import { ASR_MODELS } from "../asrModels";
 
+// Static variant of a preferences row for settings that no longer have a real choice to make.
+function ModelPreferenceStaticRow(props) {
+    return (
+        <div class="model-preferences-row">
+            <div class="model-preferences-row-label">
+                <div class="model-preferences-row-title">{props.title}</div>
+                <div class="model-preferences-row-caption">{props.caption}</div>
+            </div>
+            <div class="model-preferences-static-value">{props.value}</div>
+        </div>
+    );
+}
+
 // one "which model for X" row, reused for the question-recording and answer-transcription prefs
 function ModelPreferenceRow(props) {
     return (
@@ -41,9 +54,8 @@ function ModelPreferences() {
         <div class="model-preferences-content-wrapper">
             <div class="model-preferences-board-wrapper">
                 <div class="model-preferences-intro">
-                    Choose the ASR models Earudite uses by default. The mic dropdown on the answer
-                    screen can still override the answer model for a single game session — it starts
-                    from whatever's saved here.
+                    Choose the ASR model tagged on new question recordings for later evaluation.
+                    Spoken answers during games are always transcribed on-device (see below).
                 </div>
                 <ModelPreferenceRow
                     title="Recording questions"
@@ -51,11 +63,10 @@ function ModelPreferences() {
                     value={modelPreferences.questionModel}
                     onChange={(v) => update('questionModel', v)}
                 />
-                <ModelPreferenceRow
+                <ModelPreferenceStaticRow
                     title="Transcribing answers"
-                    caption="Default model used to transcribe your spoken answers during games."
-                    value={modelPreferences.answerModel}
-                    onChange={(v) => update('answerModel', v)}
+                    caption="Your spoken answers during games are transcribed locally on your device — no model to choose."
+                    value="Whisper Tiny (on-device)"
                 />
                 {savedFlash && <div class="model-preferences-saved">Saved</div>}
             </div>

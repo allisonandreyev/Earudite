@@ -70,15 +70,12 @@ def get_whisper_model(model_id):
         return _loaded_models[model_id]
 
 
-# Per-socket streaming buffers for live transcription
+# Per-socket streaming buffers, kept purely for storage: the client now transcribes locally
+# (in-browser, tiny model) and only streams PCM here so the raw answer recording can still be
+# uploaded to the backend as labeled training data on submit (see the 'answer' handler below).
 audio_buffers = {}       # sid -> np.ndarray (float32, 16 kHz)
-partial_transcribing = set()  # sids whose transcription is currently in flight
-last_transcription_time = {}  # sid -> float (epoch seconds of last partial transcription kick-off)
-session_model = {}       # sid -> model id chosen at start_audio_stream time
 STREAM_SAMPLE_RATE = 16000
-MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # start after 0.5 s of audio
-STREAM_WINDOW_SAMPLES = int(1.5 * STREAM_SAMPLE_RATE)  # only transcribe the last 1.5 s (low-latency window)
-STREAM_INTERVAL_S = 0.5  # minimum seconds between partial transcription kicks
+MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # minimum buffered audio to upload
 
 # SHARED BETWEEN THREADS
 current_lobby = {}  # UID : room name
@@ -448,7 +445,6 @@ def leaderboards(json, methods=['GET', 'POST']):
 
 @socketio.on('disconnect')
 def user_disconnected():
-    session_model.pop(request.sid, None)
     username = clients.get(request.sid)
     if username is None:
         return
@@ -469,17 +465,6 @@ def user_disconnected():
 def _run_whisper(audio_path, model_id=DEFAULT_MODEL_ID):
     model = get_whisper_model(model_id)  # lazy-load happens here, off the event loop (see call sites)
     segments, _ = model.transcribe(audio_path, language="en")
-    return " ".join(seg.text for seg in segments).strip()
-
-
-def _run_whisper_array(audio_array, model_id=DEFAULT_MODEL_ID):
-    model = get_whisper_model(model_id)  # lazy-load happens here, off the event loop (see call sites)
-    segments, _ = model.transcribe(
-        audio_array,
-        language="en",
-        vad_filter=True,               # skip silence — much faster
-        condition_on_previous_text=False,  # avoid hallucinating from prior context
-    )
     return " ".join(seg.text for seg in segments).strip()
 
 
@@ -517,14 +502,13 @@ def _upload_answer_audio(wav_bytes, auth_token, meta):
         print("Answer audio upload failed:", e)
 
 
-# Socket.IO live streaming handlers
+# Socket.IO live streaming handlers. Transcription itself now runs client-side (in-browser,
+# tiny model) — these only buffer the raw PCM so the answer recording can still be uploaded to
+# the backend as labeled training data on submit (see the 'answer' handler above).
 @socketio.on('start_audio_stream')
 def start_audio_stream(data):
     sid = request.sid
     audio_buffers[sid] = np.array([], dtype=np.float32)
-    # Model choice is locked in for the whole buzz-in — resolved once here rather than per
-    # chunk, so switching the dropdown mid-recording doesn't change models mid-utterance.
-    session_model[sid] = (data or {}).get('model') or DEFAULT_MODEL_ID
 
 
 @socketio.on('audio_chunk')
@@ -535,65 +519,18 @@ def handle_audio_chunk(data):
     chunk = np.frombuffer(data, dtype=np.float32)
     audio_buffers[sid] = np.concatenate([audio_buffers[sid], chunk])
 
-    now = time.time()
-    since_last = now - last_transcription_time.get(sid, 0)
-    if len(audio_buffers[sid]) < MIN_STREAM_SAMPLES or sid in partial_transcribing or since_last < STREAM_INTERVAL_S:
-        return
-
-    partial_transcribing.add(sid)
-    last_transcription_time[sid] = now
-    # Transcribe the full buffer so the answer box grows incrementally instead of
-    # showing rolling 1.5-s fragments. Cap at 10 s to bound Whisper latency.
-    full = audio_buffers[sid]
-    MAX_PARTIAL_SAMPLES = int(10 * STREAM_SAMPLE_RATE)
-    buf = full[-MAX_PARTIAL_SAMPLES:].copy() if len(full) > MAX_PARTIAL_SAMPLES else full.copy()
-
-    model_id = session_model.get(sid, DEFAULT_MODEL_ID)
-
-    def do_transcription(buf, target_sid, model_id):
-        try:
-            text = eventlet.tpool.execute(_run_whisper_array, buf, model_id)
-            if text:
-                socketio.emit('partial_transcription', {'text': text}, to=target_sid)
-        except Exception as e:
-            print("Streaming transcription error:", e)
-        finally:
-            partial_transcribing.discard(target_sid)
-
-    eventlet.spawn(do_transcription, buf, sid, model_id)
-
 
 @socketio.on('reset_audio_stream')
 def reset_audio_stream(data):
-    """Clear the buffer without triggering final transcription (used on buzz-in and question change)."""
+    """Clear the buffer (used on buzz-in and question change)."""
     sid = request.sid
     audio_buffers[sid] = np.array([], dtype=np.float32)
-    last_transcription_time.pop(sid, None)
-    partial_transcribing.discard(sid)
 
 
 @socketio.on('stop_audio_stream')
 def stop_audio_stream(data):
     sid = request.sid
-    buf = audio_buffers.pop(sid, None)
-    partial_transcribing.discard(sid)
-    last_transcription_time.pop(sid, None)
-
-    # Final transcription of full buffer — sent back so client can auto-submit
-    if buf is None or len(buf) < MIN_STREAM_SAMPLES:
-        return
-
-    model_id = session_model.get(sid, DEFAULT_MODEL_ID)
-
-    def do_final(buf, target_sid, model_id):
-        try:
-            text = eventlet.tpool.execute(_run_whisper_array, buf, model_id)
-            if text:
-                socketio.emit('final_transcription', {'text': text}, to=target_sid)
-        except Exception as e:
-            print("Final transcription error:", e)
-
-    eventlet.spawn(do_final, buf, sid, model_id)
+    audio_buffers.pop(sid, None)
 
 
 @app.route('/audioanswerupload', methods=['POST'])

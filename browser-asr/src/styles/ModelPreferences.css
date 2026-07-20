@@ -56,6 +56,14 @@
     margin-left: 1rem;
 }
 
+.model-preferences-static-value {
+    color: #6287F7;
+    font-weight: 700;
+    font-size: 1rem;
+    flex-shrink: 0;
+    margin-left: 1rem;
+}
+
 .model-preferences-saved {
     color: #2E9E5B;
     font-weight: 700;

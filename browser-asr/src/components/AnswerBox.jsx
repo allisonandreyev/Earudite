@@ -2,10 +2,10 @@ import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useOnlineAnswering } from "asr-answering";
 import MicOffIcon from "@material-ui/icons/MicOff";
 import { useRecoilValue } from "recoil";
-import { PROFILE, SOCKET, MODEL_PREFERENCES } from "../store";
-import { ASR_MODELS } from "../asrModels";
+import { PROFILE, SOCKET } from "../store";
 import { useAlert } from "react-alert";
 import { ProgressBar } from "react-bootstrap";
+import * as localWhisper from "../asr/localWhisper";
 import "../pkg/StackedProgressBar.css";
 import "../styles/AnswerBox.css";
 
@@ -88,6 +88,17 @@ function downsampleTo16k(buffer, fromRate) {
   return out;
 }
 
+// Local-transcription tuning — mirrors the tuning the server used to apply when it ran
+// faster_whisper on this same stream.
+const STREAM_SAMPLE_RATE = 16000;
+const MIN_STREAM_SAMPLES = 0.5 * STREAM_SAMPLE_RATE;  // start after 0.5s of audio
+const MAX_PARTIAL_SAMPLES = 10 * STREAM_SAMPLE_RATE;  // cap the transcribed window at 10s
+const STREAM_INTERVAL_MS = 500;                       // throttle between local transcriptions
+
+function emptyPcm() {
+  return new Float32Array(0);
+}
+
 function AnswerBox(props) {
   const profile = useRecoilValue(PROFILE);
   const username = profile["username"];
@@ -96,20 +107,20 @@ function AnswerBox(props) {
   const [speechMode, setSpeechMode] = useState(2);
   const speechModeRef = useRef(2);
 
-  // Quick per-session override of the saved answer-transcription model preference. Not
-  // persisted — it only affects this session; the saved default lives in MODEL_PREFERENCES
-  // and is edited from the Model Preferences page.
-  const modelPreferences = useRecoilValue(MODEL_PREFERENCES);
-  const [asrModel, setAsrModel] = useState(modelPreferences.answerModel);
-  const asrModelRef = useRef(asrModel);
-  useEffect(() => { asrModelRef.current = asrModel; }, [asrModel]);
-
   const socketRef = useRef(socket);
   const alertRef = useRef(alert);
+  const usernameRef = useRef(username);
   useEffect(() => { socketRef.current = socket; }, [socket]);
   useEffect(() => { alertRef.current = alert; }, [alert]);
+  useEffect(() => { usernameRef.current = username; }, [username]);
 
   const lastBuzzDetectRef = useRef(0);
+
+  // Local (in-browser) Whisper transcription scratch buffer — separate from the PCM stream sent
+  // to the server, which is storage-only now (the raw answer recording still needs to reach the
+  // backend as labeled training data; only the transcription itself moved client-side).
+  const localBufferRef = useRef(emptyPcm());
+  const lastLocalTranscribeRef = useRef(0);
 
   const audioStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -216,6 +227,7 @@ function AnswerBox(props) {
 
   // On question change: reset server buffer and ASR state
   useEffect(() => {
+    localBufferRef.current = emptyPcm();
     if (speechModeRef.current === 2) {
       socketRef.current.emit('reset_audio_stream', {});
     } else if (processorRef.current) {
@@ -250,6 +262,7 @@ function AnswerBox(props) {
         processorRef.current.disconnect();
         processorRef.current = null;
         socketRef.current.emit('stop_audio_stream', {});
+        localBufferRef.current = emptyPcm();
       }
     }
     // eslint-disable-next-line
@@ -278,66 +291,62 @@ function AnswerBox(props) {
   useEffect(()=> {
     console.log("IS LISTENING");
     initialize();
+    localWhisper.warmup();
     // eslint-disable-next-line
   },[]);
 
-  // In Whisper mode: reset server buffer on buzz-in so answer transcription starts fresh;
-  // on buzz-out, finalize the buffer then immediately restart for keyword detection.
+  // In Whisper mode: reset the local buffer on buzz-in so answer transcription starts fresh;
+  // on buzz-out, run one last local transcription over what was buffered, then restart for
+  // keyword detection. The server-side stream is storage-only now (see main.py) but still
+  // needs its own reset/stop/start so the raw recording keeps landing in the training data set.
   useEffect(() => {
     if (speechMode !== 2) return;
     if (props.buzzer === username) {
+      localBufferRef.current = emptyPcm();
       socketRef.current.emit('reset_audio_stream', {});
     } else {
+      if (localBufferRef.current.length >= MIN_STREAM_SAMPLES) {
+        runLocalTranscription(localBufferRef.current, true);
+      }
+      localBufferRef.current = emptyPcm();
       socketRef.current.emit('stop_audio_stream', {});
-      socketRef.current.emit('start_audio_stream', { model: asrModelRef.current });
+      socketRef.current.emit('start_audio_stream', {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.buzzer, username, speechMode]);
 
-  // Whisper partial transcription: update answer box when buzzed in, detect "buzz" keyword otherwise
-  useEffect(() => {
-    const handler = ({ text }) => {
-      if (!text) return;
-      if (buzzerRef.current === username) {
-        const { cleaned, hasSubmit } = processTranscription(text);
-        props.setAnswer(cleaned);
-        if (hasSubmit) actionRef.current.submit1(cleaned);
-      } else if (buzzerRef.current === '') {
-        // Detect the "buzz" keyword in the most recent speech. Partial transcriptions
-        // cover the full accumulated buffer (up to 10 s), so checking the whole text's
-        // word count never matches mid-question — only inspect the last few words.
-        // Immediately reset the server buffer so the old "buzz" audio can't re-trigger
-        // after the cooldown expires.
-        const words = text.trim().toLowerCase().split(/\s+/);
-        const recent = words.slice(-3);
-        const now = Date.now();
-        if (
-          recent.some(w => /^buzz[.!?]?$/.test(w)) &&
-          now - lastBuzzDetectRef.current > 2000
-        ) {
-          lastBuzzDetectRef.current = now;
-          socketRef.current.emit('reset_audio_stream', {});
-          actionRef.current.buzzin();
-        }
-      }
-    };
-    socket.on('partial_transcription', handler);
-    return () => socket.off('partial_transcription', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, username]);
-
-  // Final full-buffer transcription after buzz-out
-  useEffect(() => {
-    const handler = ({ text }) => {
-      if (!text || buzzerRef.current !== username) return;
+  // Apply a locally-transcribed chunk: update the answer box when buzzed in, detect the "buzz"
+  // keyword otherwise. Mirrors the old partial_transcription/final_transcription socket handlers.
+  function applyLocalTranscription(text, isFinal) {
+    if (!text) return;
+    if (buzzerRef.current === usernameRef.current) {
       const { cleaned, hasSubmit } = processTranscription(text);
       props.setAnswer(cleaned);
       if (hasSubmit) actionRef.current.submit1(cleaned);
-    };
-    socket.on('final_transcription', handler);
-    return () => socket.off('final_transcription', handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, username]);
+    } else if (!isFinal && buzzerRef.current === '') {
+      // Detect the "buzz" keyword in the most recent speech. Partial transcriptions cover the
+      // full accumulated buffer (up to 10s), so checking the whole text's word count never
+      // matches mid-question — only inspect the last few words. Immediately clear the local
+      // buffer so the old "buzz" audio can't re-trigger after the cooldown expires.
+      const words = text.trim().toLowerCase().split(/\s+/);
+      const recent = words.slice(-3);
+      const now = Date.now();
+      if (
+        recent.some(w => /^buzz[.!?]?$/.test(w)) &&
+        now - lastBuzzDetectRef.current > 2000
+      ) {
+        lastBuzzDetectRef.current = now;
+        localBufferRef.current = emptyPcm();
+        socketRef.current.emit('reset_audio_stream', {});
+        actionRef.current.buzzin();
+      }
+    }
+  }
+
+  async function runLocalTranscription(pcm, isFinal) {
+    const text = await localWhisper.transcribe(pcm);
+    applyLocalTranscription(text, isFinal);
+  }
 
   useKeyPress("Enter", submit1, [props.answer], true);
   useKeyPress(" ", buzzin, [], document.activeElement !== textAnswer.current);
@@ -346,11 +355,28 @@ function AnswerBox(props) {
 
   function startPCMStream() {
     const ctx = audioContextRef.current;
-    socketRef.current.emit('start_audio_stream', { model: asrModelRef.current });
+    socketRef.current.emit('start_audio_stream', {});
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = (e) => {
       const pcm = downsampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate);
       socketRef.current.emit('audio_chunk', pcm.buffer);
+
+      const merged = new Float32Array(localBufferRef.current.length + pcm.length);
+      merged.set(localBufferRef.current);
+      merged.set(pcm, localBufferRef.current.length);
+      localBufferRef.current = merged.length > MAX_PARTIAL_SAMPLES
+        ? merged.slice(merged.length - MAX_PARTIAL_SAMPLES)
+        : merged;
+
+      const now = Date.now();
+      if (
+        localBufferRef.current.length >= MIN_STREAM_SAMPLES &&
+        !localWhisper.isTranscribing() &&
+        now - lastLocalTranscribeRef.current >= STREAM_INTERVAL_MS
+      ) {
+        lastLocalTranscribeRef.current = now;
+        runLocalTranscription(localBufferRef.current.slice(), false);
+      }
     };
     audioSourceRef.current.connect(processor);
     processor.connect(ctx.destination);
@@ -406,6 +432,7 @@ function AnswerBox(props) {
       if (volumeInterval) clearInterval(volumeInterval);
       if (processorRef.current) { processorRef.current.disconnect(); processorRef.current = null; }
       socketRef.current.emit('stop_audio_stream', {});
+      localBufferRef.current = emptyPcm();
       if (stream) stream.getTracks().forEach((t) => t.stop());
       if (audioContext) audioContext.close();
       audioStreamRef.current = null;
@@ -431,19 +458,6 @@ function AnswerBox(props) {
         <div class="answerbox-switch-wrapper">
           <VoiceButton mode={speechMode} setMode={setSpeechMode} volume={volume} canClassify={true}/>
         </div>
-        {speechMode === 2 &&
-          <select
-            class="answerbox-asr-model-select"
-            value={asrModel}
-            disabled={props.buzzer === username}
-            title="ASR model for this session (quick override — set your default on the Model Preferences page)"
-            onChange={(e) => setAsrModel(e.target.value)}
-          >
-            {ASR_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
-          </select>
-        }
 
         <div class="answerbox-button" onClick={buzzin}>
           Buzz

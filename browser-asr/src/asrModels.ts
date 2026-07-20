@@ -1,8 +1,7 @@
-// Single source of truth for selectable ASR models, shared by the mic quick-override
-// (AnswerBox.jsx), the Model Preferences page, and (eventually) anywhere else that needs
-// to list models. Add new entries here when new models/engines become available server-side
-// (see MODEL_REGISTRY in quizzr-socket-server/main.py) — everything that renders a model
-// picker reads from this list instead of hardcoding ids.
+// Model ids a user can tag onto a new question-reading recording (Shop.jsx's questionModel
+// preference), for a future batch evaluation pipeline that compares accuracy across sizes (see
+// AiModelLeaderboard.jsx). Live answer transcription during games no longer uses this list — it
+// always runs Whisper Tiny locally in-browser (see src/asr/localWhisper.ts).
 export interface AsrModelOption {
     id: string;
     label: string;
