@@ -244,6 +244,12 @@
     margin: 0.05rem 0.2rem 0 0.4rem;
 }
 
+.shop-selectingtranscript-pool-badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    opacity: 0.85;
+}
+
 .shop-selectingtranscript-record-btn {
     cursor: pointer;
 }

@@ -52,11 +52,9 @@ function TranscriptOption(props) {
                 </div>
             </div>
             <div class="shop-selectingtranscript-transcript-footer">
-                {/* <div class="shop-taskbounty-wrapper">
-                    Bounty: 
-                    <img class="shop-selectingtranscript-coin-icon" src={CoinIcon} alt="Coins: "/>
-                    {props.bounty}
-                </div> */}
+                <div class="shop-selectingtranscript-pool-badge">
+                    {props.transcript['recorded'] ? "Re-recording" : "New question"}
+                </div>
 
                 <div onClick={handleRecord} class="shop-selectingtranscript-record-btn">
                     Record &#187;
@@ -106,22 +104,26 @@ function Shop() {
         const prevScreen = (' ' + shopScreen).slice(1);;
         setShopScreen("loading");
         const categoryParam = category === ANY_CATEGORY_ID ? "" : `&category=${encodeURIComponent(category)}`;
+        // Flip once per batch (not per candidate): this whole set of transcripts is either all
+        // re-recordings of existing questions (more readings/statistics on a question) or all
+        // brand-new questions (coverage). Roughly 50/50.
+        const poolParam = `&pool=${Math.random() < 0.5 ? "recorded" : "unrecorded"}`;
         let transcriptsArray = [[],[],[]];
         let requestsArray = [];
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=0' + categoryParam)
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=0' + categoryParam + poolParam)
                 .then(function (response) {
                     transcriptsArray[0].push(response['data']['results'][0]);
                 }));
         }
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=1' + categoryParam)
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=1' + categoryParam + poolParam)
                 .then(function (response) {
                     transcriptsArray[1].push(response['data']['results'][0]);
                 }));
         }
         for(let i = 0; i < 4; i++) {
-            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=2' + categoryParam)
+            requestsArray.push(axios.get(urls['dataflow'] + '/question/unrec?difficultyType=2' + categoryParam + poolParam)
                 .then(function (response) {
                     transcriptsArray[2].push(response['data']['results'][0]);
                 }));

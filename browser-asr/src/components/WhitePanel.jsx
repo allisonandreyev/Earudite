@@ -11,7 +11,7 @@ import axios from 'axios';
 
 // PAGES
 import Dashboard from './Dashboard.jsx';
-// import Profile from './Profile.jsx';
+import Profile from './Profile.jsx';
 import Shop from './Shop.jsx';
 import Play from './Play.jsx';
 import Leaderboards from './Leaderboards.jsx';
@@ -23,7 +23,7 @@ import ModelPreferences from './ModelPreferences.jsx';
 import HelpOutlineIcon from '@material-ui/icons/HelpOutline';
 // Sidenav
 import DashboardIcon from '@material-ui/icons/Dashboard';
-// import AccountCircleIcon from '@material-ui/icons/AccountCircle';
+import AccountCircleIcon from '@material-ui/icons/AccountCircle';
 import SportsEsportsIcon from '@material-ui/icons/SportsEsports';
 import ExitToAppIcon from '@material-ui/icons/ExitToApp';
 import EmojiEventsIcon from '@material-ui/icons/EmojiEvents';
@@ -172,7 +172,7 @@ function Sidenav(props) {
             <div class="sidenav-logo-title">{interface_name}</div>
             <div class="sidenav-logo-subtitle"><b>the</b> quiz game</div>
             <div class="sidenav-tabs-wrapper">
-                {/* <SidenavItem label="Profile" icon={<AccountCircleIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(1); document.location.hash = "profile";}} textColor={MainColor}/> */}
+                <SidenavItem label="Profile" icon={<AccountCircleIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(1); document.location.hash = "profile";}} textColor={MainColor}/>
                 <SidenavItem label="Dashboard" icon={<DashboardIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(2); document.location.hash = "dashboard";}} textColor={MainColor}/>
                 <SidenavItem label="Play" icon={<SportsEsportsIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(3); document.location.hash = "play";}} textColor={MainColor}/>
                 <SidenavItem label="Record" icon={<MicIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(4); document.location.hash = "record";}} textColor={MainColor}/>
@@ -444,24 +444,24 @@ function BigWhitePanel() {
             </div>
         );
     } 
-    // else if(screen === 1) { // profile
-    //     return (
-    //         <div class="big-white-panel-wrapper">
-    //             <div class="big-white-panel">
-    //                 <div class="content-wrapper">
-    //                     <Sidenav setScreen={setScreen}/>
-    //                     <div class="page-body-wrapper">
-    //                         <PageHeader title="Profile" caption="Track your statistics, match history, recordings, and rating!"/>
-    //                         <div class="page-body-content-wrapper">
-    //                             <Profile/>
-    //                         </div>
-    //                     </div>
-    //                 </div>
-    //             </div>
-    //             <TutorialBtn2/>
-    //         </div>
-    //     );
-    // } 
+    else if(screen === 1) { // profile
+        return (
+            <div class="big-white-panel-wrapper">
+                <div class="big-white-panel">
+                    <div class="content-wrapper">
+                        <Sidenav setScreen={setScreen}/>
+                        <div class="page-body-wrapper">
+                            <PageHeader title="Profile" caption="Track your statistics, match history, recordings, and rating!"/>
+                            <div class="page-body-content-wrapper">
+                                <Profile/>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <TutorialBtn2/>
+            </div>
+        );
+    }
     else if(screen === 3) { // select gamemode / lobby
         if(playScreen === 'casualsolo'){
             return (

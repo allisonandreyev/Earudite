@@ -12,7 +12,6 @@ import re
 import string
 import time
 from copy import deepcopy
-from itertools import chain
 from sys import exit
 from datetime import datetime, timedelta
 from http import HTTPStatus
@@ -2026,6 +2025,42 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                 True
             )
 
+    @app.route("/profile/recordings", methods=["GET"])
+    def own_recording_history():
+        """Retrieve the calling user's own recording history (self-read questions and in-game answers),
+        most recent first, optionally sliced by "start"/"end" or "iRange"."""
+        decoded = _verify_id_token()
+        user_id = decoded["uid"]
+
+        index_range_arg = request.args.get("iRange")
+        if index_range_arg:
+            index_range = [int(num) for num in re.split(r",\s*", index_range_arg)]
+
+            if len(index_range) != 2:
+                return _make_err_response(
+                    "Too many or too few items were provided for query parameter 'iRange'",
+                    "invalid_length",
+                    HTTPStatus.BAD_REQUEST,
+                    [len(index_range)],
+                    True
+                )
+
+            start = index_range[0]
+            end = index_range[1] + 1
+        else:
+            start = request.args.get("start")
+            end = request.args.get("end")
+
+            start = int(start) if start else None
+            end = int(end) + 1 if end else None
+
+        history = qtpm.get_recording_history(user_id, start, end)
+        if history is None:
+            app.logger.error(f"User with ID '{user_id}' does not have a profile. Aborting")
+            abort(HTTPStatus.NOT_FOUND)
+
+        return {"results": history}
+
     @app.route("/profile/<username>", methods=["GET", "PATCH", "DELETE"])
     def other_profile(username):
         """
@@ -2211,6 +2246,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         difficulty = request.args.get("difficultyType")
         batch_size = request.args.get("batchSize")
         category = request.args.get("category")
+        pool = request.args.get("pool")
         if category and category not in question_categories.ALL_BUCKETS:
             return _make_err_response(
                 f"Unknown category '{category}'",
@@ -2219,17 +2255,30 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                 ["category"],
                 True
             )
-        return pick_recording_question(int(difficulty) if difficulty else difficulty, int(batch_size or 1), category)
+        if pool and pool not in ("recorded", "unrecorded"):
+            return _make_err_response(
+                f"Unknown pool '{pool}'",
+                "invalid_arg",
+                HTTPStatus.BAD_REQUEST,
+                ["pool"],
+                True
+            )
+        return pick_recording_question(int(difficulty) if difficulty else difficulty, int(batch_size or 1), category, pool)
 
-    def pick_recording_question(difficulty: int, batch_size: int, category: str = None):
+    def pick_recording_question(difficulty: int, batch_size: int, category: str = None, pool: str = None):
         """
         Find a random unrecorded question (or multiple) and return the ID and transcript.
 
         :param difficulty: The difficulty type to use
         :param batch_size: The number of questions to retrieve
-        :param category: (optional) A category bucket name from question_categories.ALL_BUCKETS. When given,
-                         candidates are drawn from UnrecordedQuestions only (never RecordedQuestions — that
-                         collection is the Play-flow pool and is intentionally out of scope here).
+        :param category: (optional) A category bucket name from question_categories.ALL_BUCKETS.
+        :param pool: (optional) "unrecorded" to draw only from UnrecordedQuestions, "recorded" to draw only
+                     from RecordedQuestions (falling back to UnrecordedQuestions if nothing qualifies — e.g.
+                     nothing has been recorded yet for that difficulty/category band). Used by the
+                     record-vs-re-record split on the recording page: the client flips a coin once per
+                     batch of candidates and passes the result here. When omitted, candidates are pooled
+                     from both collections together (or, if a category is given, from UnrecordedQuestions
+                     only) — the original behavior, preserved for any other caller.
         :return: A dictionary containing a list of "results" and "errors"
         """
         # if difficulty is not None:
@@ -2271,6 +2320,7 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             "qb_id": {"$exists": True},
             "recDifficulty": {"$exists": True}
         }
+        category_query = {**query, **question_categories.category_to_mongo_filter(category)} if category else query
 
         if difficulty is not None:
             if difficulty > len(app.config["DIFFICULTY_DIST"]) - 1:
@@ -2280,34 +2330,44 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                     HTTPStatus.BAD_REQUEST,
                     log_msg=True
                 )
-            skip_unrec, limit_unrec = _get_difficulty_bounds("UnrecordedQuestions", difficulty, query)
-            skip_rec, limit_rec = _get_difficulty_bounds("RecordedQuestions", difficulty, query)
+            # Bounds must be computed against the same (possibly category-filtered) population
+            # that skip/limit actually get applied to below — otherwise, for any specific
+            # category, `skip` (a percentage of the *full* collection) overshoots that category's
+            # much smaller filtered result set and every higher-difficulty tier comes back empty.
+            skip_unrec, limit_unrec = _get_difficulty_bounds("UnrecordedQuestions", difficulty, category_query)
+            skip_rec, limit_rec = _get_difficulty_bounds("RecordedQuestions", difficulty, category_query)
         else:
             skip_unrec, limit_unrec = 0, 0
             skip_rec, limit_rec = 0, 0
 
-        if category:
-            # Category-filtered requests are scoped to UnrecordedQuestions only — RecordedQuestions
-            # is the Play-flow pool and stays out of this entirely, regardless of difficulty banding.
-            category_query = {**query, **question_categories.category_to_mongo_filter(category)}
-            unrec_cursor = qtpm.unrec_questions.find(
+        def _unrec_ids():
+            cursor = qtpm.unrec_questions.find(
                 category_query, {"qb_id": 1},
                 skip=skip_unrec, limit=limit_unrec, sort=[("recDifficulty", pymongo.ASCENDING)]
             )
-            question_ids = list({doc["qb_id"] for doc in unrec_cursor})
-        else:
-            # Get IDs for unrecorded questions
-            unrec_cursor = qtpm.unrec_questions.find(
-                query, {"qb_id": 1},
-                skip=skip_unrec, limit=limit_unrec, sort=[("recDifficulty", pymongo.ASCENDING)]
-            )
+            return {doc["qb_id"] for doc in cursor}
 
-            rec_cursor = qtpm.rec_questions.find(
-                query, {"qb_id": 1},
+        def _rec_ids():
+            cursor = qtpm.rec_questions.find(
+                category_query, {"qb_id": 1},
                 skip=skip_rec, limit=limit_rec, sort=[("recDifficulty", pymongo.ASCENDING)]
             )
+            return {doc["qb_id"] for doc in cursor}
 
-            question_ids = list({doc["qb_id"] for doc in chain(unrec_cursor, rec_cursor)})  # Ensure no duplicates are present
+        if pool == "unrecorded":
+            question_ids = list(_unrec_ids())
+        elif pool == "recorded":
+            # Fall back to an unrecorded question if nothing qualifies for re-recording (e.g. this
+            # difficulty/category band has no recordings yet) so the caller always gets a candidate.
+            question_ids = list(_rec_ids()) or list(_unrec_ids())
+        elif category:
+            # Legacy default (no `pool` given): category-filtered requests are scoped to
+            # UnrecordedQuestions only — RecordedQuestions is the Play-flow pool and stays out of
+            # this entirely, regardless of difficulty banding.
+            question_ids = list(_unrec_ids())
+        else:
+            # Legacy default (no `pool` given): pool both collections together.
+            question_ids = list(_unrec_ids() | _rec_ids())
         if not question_ids:
             return _make_err_response(
                 f"No questions found for difficulty type '{difficulty}'",
@@ -2755,10 +2815,9 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             upvotes = rec.get("upvotes") or 0
             downvotes = rec.get("downvotes") or 0
 
-            if downvotes == 0 or upvotes == 0:
-                weight = 1.0
-            else:
-                weight = upvotes / downvotes
+            # Laplace-smoothed upvote ratio: unvoted recordings default to 0.5,
+            # and more upvotes with zero downvotes still outweighs fewer upvotes.
+            weight = (upvotes + 1) / (upvotes + downvotes + 2)
 
             weights.append(weight)
 

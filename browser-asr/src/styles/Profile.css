@@ -162,5 +162,76 @@
 
 /* GAME HISTORY */
 .profile-gamehistory-wrapper {
-    
+
+}
+
+/* RECORDING HISTORY */
+.profile-recordinghistory-wrapper {
+    width: 100%;
+    border-radius: 1rem;
+    box-sizing: border-box;
+    border: 5px solid #EFF2FC;
+    background-color: white;
+    display: flex;
+    flex-direction: column;
+}
+
+.profile-recordinghistory-header-wrapper {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    margin-top: -5px;
+    background-color: #EFF2FC;
+    padding: 0.5rem;
+    border-top-right-radius: 1rem;
+    border-top-left-radius: 1rem;
+    border: 5px solid #EFF2FC;
+    box-sizing: border-box;
+}
+
+.profile-recordinghistory-back {
+    cursor: pointer;
+    color: #6287F7;
+    font-weight: 600;
+    margin-right: 1rem;
+}
+
+.profile-recordinghistory-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #6287F7;
+}
+
+.profile-recordinghistory-content-wrapper {
+    padding: 1rem;
+    flex-grow: 1;
+    overflow-y: auto;
+}
+
+.profile-recordinghistory-content-wrapper > * {
+    margin-bottom: 1rem;
+}
+
+.profile-recordinghistory-content-wrapper > *:last-child {
+    margin-bottom: 0px;
+}
+
+.profile-recordinghistory-item-wrapper {
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    border: 2px solid #e1e7fa;
+}
+
+.profile-recordinghistory-item-question {
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.profile-recordinghistory-item-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #6287F7;
 }

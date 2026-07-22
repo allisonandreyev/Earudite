@@ -7,9 +7,10 @@ Nothing here is written back to the database — these are pure functions comput
 time, so editing the taxonomy below is the entire "add/edit a category" workflow. No migration,
 no backfill, no risk of a stored field drifting out of sync with these rules.
 
-Scope: UnrecordedQuestions only. RecordedQuestions (the Play-flow pool) is never read by
-anything in this module — see server.py's pick_recording_question for where that boundary is
-enforced.
+Scope: UnrecordedQuestions and RecordedQuestions share the same document shape (a question
+moves from one collection to the other, unchanged, once it gets its first recording — see
+tpm.py), so these functions work against either. server.py's pick_recording_question decides
+per request which collection(s) to query.
 """
 
 from typing import Dict, List, Optional, Tuple

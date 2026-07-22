@@ -220,6 +220,70 @@ class QuizzrTPM:
         errs += [("internal_error", "user_update_failure")] * missed_results
         return errs
 
+    def get_recording_history(self, user_id: str, start: int = None, end: int = None) -> Optional[List[dict]]:
+        """
+        Retrieve a user's recording history (both self-read questions and in-game answers), most recent
+        first, enriched with the question text and whichever score applies to each recording type
+        (``avgRating`` for question readings, ``correct``/``transcript``/``expectedAnswer`` for answers).
+
+        :param user_id: The internal ID of the user
+        :param start: (optional) Index of the first recording to include, after reversing to most-recent-first
+        :param end: (optional) Index one past the last recording to include
+        :return: A list of recording history entries, or None if the user has no profile
+        """
+        profile = self.users.find_one({"_id": user_id}, {"recordedAudios": 1})
+        if not profile:
+            return None
+
+        rec_docs = list(reversed(profile.get("recordedAudios") or []))
+        if not rec_docs:
+            return []
+
+        audio_ids = [rec_doc["id"] for rec_doc in rec_docs]
+        audio_docs = {
+            doc["_id"]: doc
+            for doc in self.audio.find(
+                {"_id": {"$in": audio_ids}},
+                {"qb_id": 1, "correct": 1, "expectedAnswer": 1, "transcript": 1}
+            )
+        }
+
+        qb_ids = [doc["qb_id"] for doc in audio_docs.values() if doc.get("qb_id") is not None]
+        questions = {
+            doc["qb_id"]: doc["transcript"]
+            for doc in self.rec_questions.find({"qb_id": {"$in": qb_ids}}, {"qb_id": 1, "transcript": 1})
+        }
+
+        history = []
+        seen_qb_ids = set()
+        for rec_doc in rec_docs:
+            audio_doc = audio_docs.get(rec_doc["id"], {})
+            qb_id = audio_doc.get("qb_id")
+            rec_type = rec_doc.get("recType")
+
+            # A question read in multiple parts (segmented by sentenceId) produces one recording per
+            # sentence but should surface as a single history entry.
+            if rec_type == "normal" and qb_id is not None:
+                if qb_id in seen_qb_ids:
+                    continue
+                seen_qb_ids.add(qb_id)
+
+            entry = {
+                "id": rec_doc["id"],
+                "recType": rec_type,
+                "qb_id": qb_id,
+                "question": questions.get(qb_id),
+            }
+            if rec_type == "answer":
+                entry["correct"] = audio_doc.get("correct")
+                entry["transcript"] = audio_doc.get("transcript")
+                entry["expectedAnswer"] = audio_doc.get("expectedAnswer")
+            else:
+                entry["avgRating"] = rec_doc.get("avgRating")
+            history.append(entry)
+
+        return history[start:end]
+
     def store_answer_audio(self, wav_bytes: bytes, metadata: dict) -> str:
         """
         Store a game answer/buzz recording's WAV bytes in GridFS and its metadata in the Audio collection.
