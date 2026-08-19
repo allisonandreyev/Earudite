@@ -3,6 +3,7 @@ import { useState, useEffect, useReducer } from "react";
 import PersonIcon from '@material-ui/icons/Person';
 import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
 import { LOBBY_CODE, SOCKET, PLAY_SCREEN, SCREEN, AUTHTOKEN, PROFILE, GAMESETTINGS } from "../store";
+import { useVoiceCommands } from "../voice/registry";
 import Slider from '@material-ui/core/Slider';
 import SwapVertIcon from '@material-ui/icons/SwapVert';
 import {
@@ -203,6 +204,37 @@ function Lobby() {
             settings: updatedSettings,
         });
     }
+
+    useVoiceCommands('lobby', [
+        {
+            id: 'lobby.start',
+            label: 'Start game',
+            phrases: ['start game', 'start the game', 'begin game', 'lets play', 'start'],
+            run: start,
+        },
+        {
+            id: 'lobby.leave',
+            // Confirmed: leaving drops everyone's lobby state, and a misheard "quit" mid-setup
+            // would be maddening. The server no-ops a leave if you aren't in a lobby (main.py),
+            // but the local playScreen change is still disruptive.
+            label: 'Leave lobby',
+            phrases: ['leave lobby', 'quit lobby', 'leave the lobby', 'quit'],
+            run: leave,
+            confirm: true,
+        },
+        {
+            id: 'lobby.teams2',
+            label: 'Two teams',
+            phrases: ['two teams', 'teams on', 'enable teams'],
+            run: () => updateSettings({ teams: 2 }),
+        },
+        {
+            id: 'lobby.teams0',
+            label: 'No teams',
+            phrases: ['no teams', 'teams off', 'free for all'],
+            run: () => updateSettings({ teams: 0 }),
+        },
+    ]);
 
     if(lobbyScreen === "inlobby") {
         return (

@@ -1,6 +1,7 @@
 import '../styles/Tutorial.css';
 import { useState } from "react";
 import { SCREEN, PREVSCREEN, INTERFACE_NAME } from '../store';
+import { useVoiceCommands } from '../voice/registry';
 import { useRecoilValue, useSetRecoilState } from "recoil";
 import Tutorial1 from '../assets/Tutorial1.png';
 import Tutorial2 from '../assets/Tutorial2.png';
@@ -60,6 +61,12 @@ function Tutorial() {
             text: "That's all for the tutorial! Good luck, and have fun!"
         }
     ]
+
+    useVoiceCommands('tutorial', [
+        { id: 'tutorial.next', label: 'Next page', phrases: ['next page', 'next'], run: () => setPage((page + 1) % tutorialItems.length) },
+        { id: 'tutorial.prev', label: 'Previous page', phrases: ['previous page', 'previous', 'go back', 'back'], run: () => setPage((page - 1 + tutorialItems.length) % tutorialItems.length) },
+        { id: 'tutorial.exit', label: 'Exit tutorial', phrases: ['exit tutorial', 'close tutorial', 'exit'], run: () => setScreen(prevScreen) },
+    ]);
 
     function TutorialBtns(props) {
         return (

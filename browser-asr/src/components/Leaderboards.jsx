@@ -264,12 +264,12 @@ function Leaderboards() {
 
         return (
             <div class="leaderboards-content-wrapper">
-                {selectedMonth && selectedYear && <div onClick={() => {setScreen("archives");}} class="leaderboards-go-back-btn"><ArrowBackIcon/></div>}
+                {selectedMonth && selectedYear && <div onClick={() => {setScreen("archives");}} aria-label="Back" title="Back" class="leaderboards-go-back-btn"><ArrowBackIcon/></div>}
                 {topic === "all" &&
                     <div class="leaderboards-board-wrapper">
                         <div class="leaderboards-board-title">
                             Top scorers ({selectedMonth && selectedYear ? selectedMonth + " " + selectedYear : months[new Date().getMonth()]})
-                            <div onClick={updateLeaderboards} class="leaderboards-update-btn leaderboards-update-btn-hvr-rotate">
+                            <div onClick={updateLeaderboards} aria-label="Refresh" title="Refresh" class="leaderboards-update-btn leaderboards-update-btn-hvr-rotate">
                                 <LoopIcon style={{ color: "white", height: "2.5rem" }} />
                             </div>
                         </div>
@@ -294,7 +294,7 @@ function Leaderboards() {
                     <div class="leaderboards-board-wrapper">
                         <div class="leaderboards-board-title">
                             Top recorders ({selectedMonth && selectedYear ? selectedMonth + " " + selectedYear : months[new Date().getMonth()]})
-                            <div onClick={updateLeaderboards} class="leaderboards-update-btn leaderboards-update-btn-hvr-rotate">
+                            <div onClick={updateLeaderboards} aria-label="Refresh" title="Refresh" class="leaderboards-update-btn leaderboards-update-btn-hvr-rotate">
                                 <LoopIcon style={{ color: "white", height: "2.5rem" }} />
                             </div>
                         </div>
@@ -333,8 +333,10 @@ function Leaderboards() {
     } else if (screen === "archives") {
         return (
             <div class="leaderboards-content-wrapper">
-                <div 
-                    onClick={() => {setScreen("home"); setSelectedYear(null); setSelectedMonth(null);}} 
+                <div
+                    onClick={() => {setScreen("home"); setSelectedYear(null); setSelectedMonth(null);}}
+                    aria-label="Back"
+                    title="Back"
                     class="leaderboards-go-back-btn"
                 >
                     <ArrowBackIcon/>

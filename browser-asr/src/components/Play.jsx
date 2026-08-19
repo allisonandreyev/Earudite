@@ -2,6 +2,7 @@ import "../styles/Play.css";
 import { useState } from "react";
 import { useRecoilValue, useSetRecoilState } from "recoil";
 import { SOCKET, LOBBY_CODE, PLAY_SCREEN, GAMESETTINGS, AUTHTOKEN } from "../store";
+import { useVoiceCommands } from "../voice/registry";
 import { useEffect } from "react";
 import { useAlert } from 'react-alert'
 
@@ -263,6 +264,15 @@ function StartCustomLobbyButton() {
             gamemode: "custom",
         });
     }
+
+    useVoiceCommands('play.createLobby', [
+        {
+            id: 'play.create',
+            label: 'Create lobby',
+            phrases: ['create lobby', 'create a lobby', 'create game', 'new game', 'create'],
+            run: StartLobby,
+        },
+    ]);
 
     return (
         <div class="play-gamemodecard-start play-hvr-grow" onClick={StartLobby}>

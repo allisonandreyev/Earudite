@@ -6,6 +6,7 @@ import 'react-tippy/dist/tippy.css';
 import axios from 'axios';
 import { useRecoilState, useRecoilValue } from "recoil";
 import { TRANSCRIPTS, URLS, MODEL_PREFERENCES } from "../store";
+import { useVoiceCommands } from "../voice/registry";
 import { QUESTION_CATEGORIES, ANY_CATEGORY_ID } from "../questionCategories";
 import AudioRecorder from './AudioRecorder.jsx';
 
@@ -156,6 +157,39 @@ function Shop() {
         if(b) submitAudios2();
     }
 
+    // Voice commands for the recording flow. The list is rebuilt per sub-screen rather than
+    // guarded, because the registry scopes commands by mount: "reroll" simply does not exist
+    // unless the transcript picker is showing, so it can't fire from the difficulty screen.
+    const voiceCommands = [];
+    if (shopScreen === 'home') {
+        voiceCommands.push(
+            { id: 'shop.easy', label: 'Easy', phrases: ['easy', 'easy questions'], run: () => activateShopScreen('easy') },
+            { id: 'shop.medium', label: 'Medium', phrases: ['medium', 'medium questions'], run: () => activateShopScreen('medium') },
+            { id: 'shop.hard', label: 'Hard', phrases: ['hard', 'hard questions'], run: () => activateShopScreen('hard') },
+        );
+        QUESTION_CATEGORIES.forEach((c) => {
+            voiceCommands.push({
+                id: 'shop.cat.' + c.id,
+                label: 'Category: ' + c.label,
+                phrases: ['category ' + c.label.toLowerCase(), c.label.toLowerCase() + ' category'],
+                run: () => setCategory(c.id),
+            });
+        });
+    } else if (shopScreen === 'selectingtranscript') {
+        voiceCommands.push(
+            { id: 'shop.reroll', label: 'Reroll', phrases: ['reroll', 'shuffle', 'different questions', 'new questions'], run: rerollTranscripts },
+            { id: 'shop.back', label: 'Back', phrases: ['go back', 'back', 'cancel'], run: () => setShopScreen('home') },
+        );
+    } else if (shopScreen === 'recording') {
+        voiceCommands.push(
+            // Confirmed: submitting uploads every recorded sentence and ends the session, and it
+            // cannot be undone from the UI.
+            { id: 'shop.submit', label: 'Submit recording', phrases: ['submit recording', 'submit recordings', 'upload recording', 'done recording'], run: submitAudios, confirm: true },
+            { id: 'shop.backToPick', label: 'Back', phrases: ['go back', 'back', 'cancel'], run: () => setShopScreen('selectingtranscript') },
+        );
+    }
+    useVoiceCommands('shop', voiceCommands);
+
     async function submitAudios2() {
         setShopScreen("submitting");
         const formdata = new FormData();
@@ -288,7 +322,7 @@ function Shop() {
                     <div onClick={() => {setShopScreen("home")}} class="shop-selectingtranscript-cancel-btn">
                         Back
                     </div>
-                    <div onClick={rerollTranscripts} class="shop-selectingtranscript-reroll-btn shop-selectingtranscript-reroll-btn-hvr-rotate">
+                    <div onClick={rerollTranscripts} aria-label="Reroll" title="Reroll" class="shop-selectingtranscript-reroll-btn shop-selectingtranscript-reroll-btn-hvr-rotate">
                         <LoopIcon style={{color: "white", height: "2.5rem"}}/>
                     </div>
                 </div>

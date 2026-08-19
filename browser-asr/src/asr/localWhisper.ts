@@ -15,6 +15,25 @@ const WORKER_SOURCE = `
 import { pipeline, env } from "${TRANSFORMERS_CDN_URL}";
 env.allowLocalModels = false;
 
+// Multi-threaded WASM. onnxruntime-web can only use threads when the page is cross-origin
+// isolated (crossOriginIsolated === true), which requires COOP/COEP response headers — set by
+// server/server.js. Without them SharedArrayBuffer is unavailable and ORT silently runs on ONE
+// thread, which is what made a single whisper-tiny pass cost ~1.07s no matter how short the audio
+// was: the encoder cost is flat, so single-threaded is a hard latency floor.
+//
+// Guarded rather than assumed: if isolation is missing (headers stripped by a proxy, or an older
+// browser), this falls back to 1 thread and still works, just as slowly as before.
+try {
+  const isolated = typeof self.crossOriginIsolated !== "undefined" && self.crossOriginIsolated;
+  const cores = (self.navigator && self.navigator.hardwareConcurrency) || 4;
+  // Leave headroom for the main thread's audio callback — starving it is what makes buzz
+  // detection feel laggy even when inference itself is fast.
+  env.backends.onnx.wasm.numThreads = isolated ? Math.max(1, Math.min(4, cores - 2)) : 1;
+  self.postMessage({ diag: "threads=" + env.backends.onnx.wasm.numThreads + " isolated=" + isolated });
+} catch (err) {
+  self.postMessage({ diag: "thread-config failed: " + String(err && err.message || err) });
+}
+
 let pipelinePromise = null;
 function getPipeline() {
   if (!pipelinePromise) {
@@ -53,7 +72,8 @@ function getWorker(): Worker {
     const blob = new Blob([WORKER_SOURCE], { type: "text/javascript" });
     worker = new Worker(URL.createObjectURL(blob), { type: "module" });
     worker.onmessage = (e: MessageEvent) => {
-        const { id, text, error } = e.data || {};
+        const { id, text, error, diag } = e.data || {};
+        if (diag) { console.log("[localWhisper]", diag); return; }
         const entry = pending.get(id);
         if (!entry) return;
         pending.delete(id);

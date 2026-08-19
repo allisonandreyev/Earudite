@@ -4,12 +4,27 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY_BIN="/opt/homebrew/Caskroom/miniconda/base/envs/earudite/bin"
 
-if [ ! -x "$PY_BIN/python3.11" ]; then
-  echo "ERROR: conda env 'earudite' not found at $PY_BIN" >&2
+# Locate the 'earudite' conda env. It has lived under both miniconda and anaconda3, so probe the
+# known locations (and $CONDA_PREFIX) instead of hardcoding one — a moved install used to make
+# this script fail at line 1 with a misleading "conda env not found".
+PY_BIN="${EARUDITE_PY_BIN:-}"
+if [ -z "$PY_BIN" ]; then
+  for candidate in \
+    "/opt/anaconda3/envs/earudite/bin" \
+    "/opt/homebrew/Caskroom/miniconda/base/envs/earudite/bin" \
+    "$HOME/miniconda3/envs/earudite/bin" \
+    "$HOME/anaconda3/envs/earudite/bin"; do
+    if [ -x "$candidate/python3.11" ]; then PY_BIN="$candidate"; break; fi
+  done
+fi
+
+if [ -z "$PY_BIN" ] || [ ! -x "$PY_BIN/python3.11" ]; then
+  echo "ERROR: conda env 'earudite' not found. Looked in /opt/anaconda3, /opt/homebrew miniconda," >&2
+  echo "       ~/miniconda3 and ~/anaconda3. Set EARUDITE_PY_BIN=/path/to/env/bin to override." >&2
   exit 1
 fi
+echo "Using python from: $PY_BIN"
 
 if [ ! -f "$ROOT_DIR/.env.local" ]; then
   echo "ERROR: $ROOT_DIR/.env.local not found. Create it with CONNECTION_STRING and FIREBASE_KEY_PATH." >&2

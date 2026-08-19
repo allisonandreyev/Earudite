@@ -38,6 +38,7 @@
     "react-google-login": "^5.2.2",
     "react-input-slider": "^6.0.1",
     "react-scripts": "4.0.3",
+    "react-speech-recognition": "^3.9.0",
     "react-switch": "^6.0.0",
     "react-tabs": "^3.2.2",
     "react-tippy": "^1.4.0",
@@ -51,8 +52,8 @@
     "yarn": "^1.22.11"
   },
   "scripts": {
-    "start": "NODE_OPTIONS=--openssl-legacy-provider react-scripts start",
-    "build": "NODE_OPTIONS=--openssl-legacy-provider react-scripts build",
+    "start": "node -e \"process.exit(process.versions.openssl.split('.')[0]>='3'?0:1)\" && export NODE_OPTIONS=--openssl-legacy-provider; react-scripts start",
+    "build": "node -e \"process.exit(process.versions.openssl.split('.')[0]>='3'?0:1)\" && export NODE_OPTIONS=--openssl-legacy-provider; react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

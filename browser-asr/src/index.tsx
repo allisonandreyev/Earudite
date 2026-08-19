@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import "./styles/index.css";
 import BigWhitePanel from "./components/WhitePanel";
+import VoiceNav from "./voice/VoiceNav";
 import reportWebVitals from "./reportWebVitals";
 import { RecoilRoot } from "recoil";
 import { transitions, positions, Provider as AlertProvider } from 'react-alert';
@@ -21,6 +22,10 @@ ReactDOM.render(
     <RecoilRoot>
         <AlertProvider template={AlertTemplate} {...alertConfig}>
           <BigWhitePanel/>
+          {/* Sibling of the router on purpose — VoiceNav subscribes to react-speech-recognition,
+              and its re-renders must not cascade into Game/AnswerBox, whose audio callback runs on
+              the main thread. See the header comment in VoiceNav.jsx. */}
+          <VoiceNav/>
         </AlertProvider>
     </RecoilRoot>
   </React.StrictMode>,

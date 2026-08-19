@@ -6,6 +6,7 @@ import Tutorial from './Tutorial.jsx';
 import Lobby from './Lobby.jsx';
 import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
 import { SCREEN, PLAY_SCREEN, SOCKET, PROFILE, AUTHTOKEN, URLS, PREVSCREEN, INTERFACE_NAME } from "../store";
+import { useVoiceCommands } from "../voice/registry";
 import { useAlert } from 'react-alert';
 import axios from 'axios';
 
@@ -166,6 +167,20 @@ function Sidenav(props) {
     const LogoutColor = "#b52121";
 
     const interface_name = useRecoilValue(INTERFACE_NAME);
+
+    // The sidenav is excluded from DOM control discovery (see domControls.js) so its items can't
+    // collide with same-named buttons in the page body. Every destination is already a NAV_INTENT
+    // except Logout, so it is registered here — with confirmation, since a misheard word should
+    // never sign someone out.
+    useVoiceCommands('sidenav', [
+        {
+            id: 'sidenav.logout',
+            label: 'Log out',
+            phrases: ['log out', 'logout', 'sign out'],
+            run: () => firebase.auth().signOut(),
+            confirm: true,
+        },
+    ]);
 
     return (
         <div class="sidenav-wrapper">

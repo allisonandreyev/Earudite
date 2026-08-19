@@ -2,6 +2,7 @@ import "../styles/ModelPreferences.css";
 import { useState } from "react";
 import { useRecoilState } from "recoil";
 import { MODEL_PREFERENCES, saveModelPreferences } from "../store";
+import { useVoiceCommands } from "../voice/registry";
 import { ASR_MODELS } from "../asrModels";
 
 // Static variant of a preferences row for settings that no longer have a real choice to make.
@@ -49,6 +50,14 @@ function ModelPreferences() {
         setSavedFlash(true);
         setTimeout(() => setSavedFlash(false), 1500);
     }
+
+    // One command per model, generated from ASR_MODELS so adding a model to that list is enough.
+    useVoiceCommands('modelPreferences', ASR_MODELS.map((m) => ({
+        id: 'models.' + m.id,
+        label: 'Use ' + m.label,
+        phrases: ['use ' + m.id, 'use whisper ' + m.id, 'switch to ' + m.id, m.id + ' model'],
+        run: () => update('questionModel', m.id),
+    })));
 
     return (
         <div class="model-preferences-content-wrapper">
