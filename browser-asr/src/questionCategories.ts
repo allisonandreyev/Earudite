@@ -10,12 +10,13 @@ export const ANY_CATEGORY_ID = "any";
 
 export const QUESTION_CATEGORIES: QuestionCategoryOption[] = [
     { id: ANY_CATEGORY_ID, label: "Any category" },
-    { id: "Literature", label: "Literature" },
-    { id: "History", label: "History" },
-    { id: "Science", label: "Science" },
-    { id: "Fine Arts/Music", label: "Fine Arts/Music" },
-    { id: "Geography", label: "Geography" },
-    { id: "Religion/Mythology/Philosophy", label: "Religion/Mythology/Philosophy" },
+    { id: "Music ID", label: "Music ID" },
+    { id: "Musical Elements", label: "Musical Elements" },
     { id: "Sports/Pop Culture", label: "Sports/Pop Culture" },
-    { id: "Miscellaneous", label: "Miscellaneous" },
+    { id: "Character/Person", label: "Character/Person" },
+    { id: "Geography", label: "Geography" },
+    { id: "Sound/Environment", label: "Sound/Environment" },
+    // question_categories.py also defines a "Miscellaneous" fallback bucket, deliberately omitted
+    // here: every AUDITA question maps to one of the buckets above, so it would always come back
+    // empty. Add it back if an import ever introduces a category with no rule of its own.
 ];

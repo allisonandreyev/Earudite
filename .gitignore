@@ -22,3 +22,5 @@ npm-debug.log*
 
 # Local DB backups/exports — never commit raw dataset dumps
 backups/
+# Pre-import snapshots written by quizzr-server/maintenance/import_audita.py
+quizzr-server/question_backups/

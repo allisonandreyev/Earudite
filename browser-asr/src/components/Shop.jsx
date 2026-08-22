@@ -177,7 +177,9 @@ function Shop() {
         });
     } else if (shopScreen === 'selectingtranscript') {
         voiceCommands.push(
-            { id: 'shop.reroll', label: 'Reroll', phrases: ['reroll', 'shuffle', 'different questions', 'new questions'], run: rerollTranscripts },
+            // "refresh" is what the circular-arrow icon reads as to most people; the button's only
+            // name is aria-label="Reroll", so without these the word matched nothing at all here.
+            { id: 'shop.reroll', label: 'Reroll', phrases: ['reroll', 'refresh', 'reload', 'shuffle', 'update', 'different questions', 'new questions'], run: rerollTranscripts },
             { id: 'shop.back', label: 'Back', phrases: ['go back', 'back', 'cancel'], run: () => setShopScreen('home') },
         );
     } else if (shopScreen === 'recording') {

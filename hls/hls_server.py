@@ -1,15 +1,14 @@
 """
 Replacement HLS server for macOS (replaces the Linux-only Go-HLS-Streamer binary).
 
-Audio source: Pinafore/audio_data GitHub repo, looked up by matching question text.
+Audio source: the AUDITA clip registered on each question document, resolved by ID (never by
+text). See quizzr-server/maintenance/import_audita.py.
 """
 
-import json
 import os
 import re
 import subprocess
 import tempfile
-import urllib.request
 import uuid
 
 import pymongo
@@ -30,62 +29,54 @@ print(f"[HLS] Stream cache: {STREAM_DIR}")
 
 streams: dict = {}
 
-# --- Load audio index from GitHub and build question-text lookup ---
-COMBINED_JSON_URL = "https://raw.githubusercontent.com/Pinafore/audio_data/main/combined%20(1).json"
-AUDIO_INDEX: list = []
-# Maps normalised question text → raw GitHub audio URL
-QUESTION_TO_AUDIO_URL: dict = {}
-
-def _normalise(text: str) -> str:
-    """Lower-case, collapse whitespace, strip trailing punctuation for fuzzy matching."""
-    return re.sub(r"\s+", " ", text.lower().strip().rstrip("?. "))
-
-print("[HLS] Downloading audio index from GitHub...")
-try:
-    with urllib.request.urlopen(COMBINED_JSON_URL, timeout=30) as f:
-        AUDIO_INDEX = json.loads(f.read())
-    for entry in AUDIO_INDEX:
-        url = entry.get("file_name", "").replace(
-            "https://raw.githubusercontent.com/tkabir1/audio_data/",
-            "https://raw.githubusercontent.com/Pinafore/audio_data/",
-        )
-        q = _normalise(entry.get("question", ""))
-        if url and q and q not in QUESTION_TO_AUDIO_URL:
-            QUESTION_TO_AUDIO_URL[q] = url
-    print(f"[HLS] Loaded {len(AUDIO_INDEX)} audio entries, {len(QUESTION_TO_AUDIO_URL)} unique questions indexed")
-except Exception as e:
-    print(f"[HLS] WARNING: Could not load audio index: {e}")
-
-# --- MongoDB (kept for potential future use) ---
+# --- MongoDB: the authoritative question -> clip link ---
+#
+# Audio used to be found by fuzzy-matching the question's *text* against combined.json. That was
+# unsound: the AUDITA dataset has 9,686 questions but only 3,768 distinct question strings, and one
+# string ("You are listening to a theme from a TV Show...") covers 1,320 different clips. Any text
+# match therefore had a ~1-in-1320 chance of picking the intended audio for that group.
+#
+# The importer (quizzr-server/maintenance/import_audita.py) now stores each clip's URL directly on
+# its own question and Audio document, so the clip is resolved by ID. Exact, or nothing.
 MONGO_URI = os.environ.get("CONNECTION_STRING", "")
 _audio_col = None
+_rec_questions_col = None
 try:
     _mongo = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    _audio_col = _mongo["QuizzrDatabase"]["Audio"]
+    _db = _mongo["QuizzrDatabase"]
+    _audio_col = _db["Audio"]
+    _rec_questions_col = _db["RecordedQuestions"]
     _audio_col.find_one({})
     print("[HLS] MongoDB connected")
 except Exception as e:
     print(f"[HLS] WARNING: MongoDB unavailable: {e}")
 
 
-def get_audio_url_for_question(question_text: str) -> str | None:
-    """Match the question text against the AUDIO_INDEX and return the audio URL."""
-    if not QUESTION_TO_AUDIO_URL or not question_text:
+def get_dataset_audio_url(qid: str, qb_id: int | None) -> str | None:
+    """
+    Resolve the dataset clip for this stream by ID.
+
+    `qid` is the Audio document's _id, which is the tighter key: it identifies one specific clip
+    attached to one specific question. `qb_id` is the fallback for the same row reached from the
+    question side.
+    """
+    if _audio_col is None:
         return None
-    norm = _normalise(question_text)
-    # 1. Exact match
-    if norm in QUESTION_TO_AUDIO_URL:
-        return QUESTION_TO_AUDIO_URL[norm]
-    # 2. Prefix match on first 8 words
-    prefix = " ".join(norm.split()[:8])
-    for key, url in QUESTION_TO_AUDIO_URL.items():
-        if key.startswith(prefix):
-            return url
-    # 3. Prefix match on first 5 words
-    prefix5 = " ".join(norm.split()[:5])
-    for key, url in QUESTION_TO_AUDIO_URL.items():
-        if key.startswith(prefix5):
-            return url
+    try:
+        doc = _audio_col.find_one({"_id": qid}, {"audioUrl": 1})
+        if doc and doc.get("audioUrl"):
+            return doc["audioUrl"]
+    except Exception as e:
+        print(f"[HLS] Audio lookup failed for {qid}: {e}")
+
+    if qb_id is None or _rec_questions_col is None:
+        return None
+    try:
+        doc = _rec_questions_col.find_one({"qb_id": qb_id}, {"audioUrl": 1})
+        if doc and doc.get("audioUrl"):
+            return doc["audioUrl"]
+    except Exception as e:
+        print(f"[HLS] Question lookup failed for qb_id={qb_id}: {e}")
     return None
 
 
@@ -221,65 +212,82 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
     except Exception as e:
         print(f"[HLS] VTT failed for {qid}: {e}")
 
-    # Extract question text from VTT for audio matching
+    # Extract the prompt from the VTT — used only for the caption track below, never for
+    # deciding which clip to play. Clip selection is by ID (see get_dataset_audio_url).
     question_text = ""
     if has_subtitles:
-        cue_texts = re.findall(r"<v [^>]+>(.*?)(?:\n|$)", fixed)
-        if not cue_texts:
-            cue_texts = re.findall(r"-->[^\n]+\n(.+)", fixed)
-        question_text = " ".join(t.strip() for t in cue_texts if t.strip())
+        # Cue text runs from the line after a timing line until the next blank line, and may be
+        # several lines long: 687 of the sound-captioning prompts are an instruction, an answer
+        # format and a worked example. The old pattern stopped at the first newline, so everything
+        # after the opening question was silently dropped from the rewritten caption.
+        blocks = re.findall(r"-->[^\n]*\n((?:.+\n?)+)", fixed)
+        cue_lines = []
+        for block in blocks:
+            for line in block.splitlines():
+                line = re.sub(r"<[^>]*>", "", line).strip()
+                if line:
+                    cue_lines.append(line)
+        question_text = "\n".join(cue_lines)
 
-    # 2. Audio — try backend first (VTT-aligned recording), then GitHub by question text.
+    # 2. Audio.
+    #
+    # For an AUDITA question the dataset clip *is* the question, so it is the authoritative source
+    # and is tried first. The backend endpoint (a human reading a question aloud, the old protobowl
+    # flow) is the fallback for any row that still has a user recording.
     audio_path = os.path.join(output_dir, "audio_src")
     got_audio = False
-    used_github = False
+    used_dataset = False
 
-    # Primary: backend audio endpoint
-    try:
-        backend_audio_url = f"{AUDIO_BASE_URL}/{qid}?batch"
-        print(f"[HLS] Downloading audio from backend: {backend_audio_url}")
-        r = requests.get(backend_audio_url, timeout=60, stream=True)
-        r.raise_for_status()
-        audio_path = os.path.join(output_dir, "audio_src.wav")
-        with open(audio_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-        transcode_to_hls(audio_path, output_dir)
-        got_audio = True
-        print(f"[HLS] Audio transcoded for {qid} (backend source)")
-    except Exception as e:
-        print(f"[HLS] Backend audio failed for {qid}: {e}")
+    dataset_url = get_dataset_audio_url(qid, qb_id)
+    if dataset_url:
+        try:
+            print(f"[HLS] Dataset clip for {qid} (qb_id={qb_id}): {dataset_url}")
+            r = requests.get(dataset_url, timeout=60, stream=True)
+            r.raise_for_status()
+            ext = dataset_url.rsplit(".", 1)[-1].lower()
+            if ext not in ("mp3", "wav", "flac", "m4a", "ogg"):
+                ext = "mp3"
+            audio_path = os.path.join(output_dir, f"audio_src.{ext}")
+            with open(audio_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+            transcode_to_hls(audio_path, output_dir)
+            got_audio = True
+            used_dataset = True
+            print(f"[HLS] Audio transcoded for {qid} (dataset clip)")
+        except Exception as e:
+            print(f"[HLS] Dataset clip failed for {qid}: {e}")
+    else:
+        print(f"[HLS] No dataset clip registered for {qid} (qb_id={qb_id})")
 
-    # Fallback: match question text → GitHub audio URL
-    if not got_audio and question_text:
-        audio_url = get_audio_url_for_question(question_text)
-        if audio_url:
-            try:
-                print(f"[HLS] GitHub match for '{question_text[:60]}': {audio_url}")
-                r = requests.get(audio_url, timeout=60, stream=True)
-                r.raise_for_status()
-                ext = audio_url.rsplit(".", 1)[-1].lower()
-                audio_path = os.path.join(output_dir, f"audio_src.{ext}")
-                with open(audio_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        f.write(chunk)
-                transcode_to_hls(audio_path, output_dir)
-                got_audio = True
-                used_github = True
-                print(f"[HLS] Audio transcoded for {qid} (GitHub match)")
-            except Exception as e:
-                print(f"[HLS] GitHub audio failed for {qid}: {e}")
-        else:
-            print(f"[HLS] No GitHub match for question: '{question_text[:80]}'")
+    # Fallback: a user recording served by the backend.
+    if not got_audio:
+        try:
+            backend_audio_url = f"{AUDIO_BASE_URL}/{qid}?batch"
+            print(f"[HLS] Falling back to backend audio: {backend_audio_url}")
+            r = requests.get(backend_audio_url, timeout=60, stream=True)
+            r.raise_for_status()
+            audio_path = os.path.join(output_dir, "audio_src.wav")
+            with open(audio_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+            transcode_to_hls(audio_path, output_dir)
+            got_audio = True
+            print(f"[HLS] Audio transcoded for {qid} (backend source)")
+        except Exception as e:
+            print(f"[HLS] Backend audio failed for {qid}: {e}")
 
-    # When GitHub audio is used, rewrite VTT to span the full clip.
-    # The original VTT timestamps matched a human reading; the clip has different timing.
-    if used_github and has_subtitles:
+    # The stored VTT carries a placeholder duration (the importer cannot know clip lengths without
+    # downloading all 9,686 files), so stretch the single cue over the clip's real duration.
+    if used_dataset and has_subtitles:
         try:
             audio_dur = get_audio_duration(audio_path)
             if audio_dur > 0:
                 end_ts = f"{int(audio_dur // 60):02d}:{audio_dur % 60:06.3f}"
-                new_vtt = f"WEBVTT\n\n00:00.500 --> {end_ts}\n<v Speaker 0>{question_text}\n"
+                # Keep the prompt's line structure. A cue may span lines, but a BLANK line would
+                # terminate it, so only non-empty lines are emitted.
+                cue_body = "\n".join(ln for ln in question_text.split("\n") if ln.strip())
+                new_vtt = f"WEBVTT\n\n00:00.500 --> {end_ts}\n<v Speaker 0>{cue_body}\n"
                 with open(os.path.join(output_dir, "subtitle.vtt"), "w") as f:
                     f.write(new_vtt)
                 with open(os.path.join(output_dir, "subtitle.m3u8"), "w") as f:

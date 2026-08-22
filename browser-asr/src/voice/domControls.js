@@ -1,4 +1,4 @@
-import { normalizePhrase } from './intents';
+import { normalizePhrase, groupOrdinalPhrases } from './intents';
 
 // Context-aware control discovery.
 //
@@ -44,11 +44,15 @@ const LABEL_SYNONYMS = {
   update: ['refresh', 'reload'],
   back: ['go back', 'return'],
   cancel: ['go back', 'nevermind'],
-  reroll: ['shuffle', 'different questions', 'new questions'],
+  reroll: ['refresh', 'reload', 'shuffle', 'update', 'different questions', 'new questions'],
   create: ['create lobby', 'new lobby'],
   join: ['join lobby'],
-  start: ['start game'],
   submit: ['send answer'],
+  pause: ['hold', 'wait'],
+  resume: ['continue', 'unpause', 'keep going'],
+  start: ['start game', 'begin'],
+  stop: ['end', 'finish'],
+  restart: ['start over', 'try again'],
 };
 
 // Text that should never fire from a single utterance without confirming first.
@@ -225,7 +229,12 @@ export function scanControls() {
     const label = labelOf(el);
     // Long strings are prose, not buttons; empty ones give the user nothing to say.
     if (!label || label.length > 32) return;
-    const phrase = label.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    let phrase = label.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    // Drop a trailing counter. The recorder's buttons read "PAUSE 0:07" / "RESUME 1:23", so the
+    // only phrase they offered was the elapsed time — nobody says that, and it changed every
+    // second anyway, which is why "pause" matched nothing at all while recording.
+    const spoken = phrase.replace(/(\s+\d+)+$/, '').trim();
+    if (spoken) phrase = spoken;
     if (!phrase) return;
     found.push({ el, label, phrase });
   });
@@ -237,7 +246,6 @@ export function scanControls() {
   const counts = {};
   found.forEach((f) => { counts[f.key] = (counts[f.key] || 0) + 1; });
 
-  const ORDINALS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
   const seenIndex = {};
 
   // For a label that appears more than once, the bare word can't select a specific control — but
@@ -252,6 +260,9 @@ export function scanControls() {
       phrases: [phrase, 'click ' + phrase, 'press ' + phrase].concat(withInflections(phrase)),
       source: 'screen',
       ambiguous: true,
+      // `group` ties this prompt to the numbered controls below it, so the listener can resolve
+      // a follow-up "two" without re-deriving which controls were being talked about.
+      group: phrase,
       count: counts[phrase],
       run: () => {},
     }));
@@ -271,8 +282,11 @@ export function scanControls() {
       // "Recording" / "Recordings" reads as "record one / two / three" instead of three different
       // prefixes. Matching stems both sides anyway, so this is purely so the help panel and the
       // "which one?" prompt agree on what to say.
-      const ord = ORDINALS[n - 1];
-      phrases = ord ? [f.key + ' ' + ord, f.key + ' number ' + ord] : [];
+      //
+      // The phrase list comes from the same place the choice prompt's does, so "record 1" — which
+      // is what Web Speech usually returns for a spoken "record one" — works in both places rather
+      // than only after the prompt.
+      phrases = groupOrdinalPhrases(f.key, n);
     } else {
       phrases = [f.phrase, 'click ' + f.phrase, 'press ' + f.phrase];
       const syn = LABEL_SYNONYMS[f.phrase];
@@ -285,6 +299,9 @@ export function scanControls() {
       label: duplicated ? f.label + ' (' + n + ')' : f.label,
       phrases: phrases,
       source: 'screen',
+      group: duplicated ? f.key : null,
+      groupIndex: duplicated ? n - 1 : -1,
+      el: f.el,
       confirm: DESTRUCTIVE.test(f.label),
       run: () => { try { f.el.click(); } catch (e) { /* detached between scan and speech */ } },
     };
@@ -302,4 +319,85 @@ export function getScreenControls() {
   if (now - cache.at < CACHE_MS) return cache.intents;
   cache = { at: now, intents: scanControls() };
   return cache.intents;
+}
+
+
+// While a choice is pending, label each control in the group with the words that press it.
+//
+// The label reads `say "two"`, not a bare "2". A lone number floating over a button explains
+// nothing — it could be a count, a rank, a step. Spelling out the instruction, and using the WORD
+// the user has to speak rather than the digit, makes both the purpose and the exact phrase
+// obvious without a legend to consult.
+//
+// Deliberately not a microphone icon: these appear most often over the RECORD buttons on the
+// recording page, where a mic would read as "this button records" — the opposite of what it means.
+//
+// These are plain DOM nodes rather than React state on purpose: VoiceNav sits outside the router
+// precisely so it cannot re-render the page, and the controls being labelled belong to components
+// it can't reach.
+const BADGE_ATTR = 'data-voicenav-badge';
+let badgeEls = [];
+
+export function clearChoiceBadges() {
+  badgeEls.forEach((b) => {
+    try { if (b.parentNode) b.parentNode.removeChild(b); } catch (e) { /* already gone */ }
+  });
+  badgeEls = [];
+}
+
+// entries: [{ el, word }] — the element to label and the word that presses it.
+export function showChoiceBadges(entries) {
+  clearChoiceBadges();
+  try {
+    entries.forEach((entry) => {
+      const word = entry.word;
+      if (!entry.el || !entry.el.getBoundingClientRect || !word) return;
+      const r = entry.el.getBoundingClientRect();
+
+      const badge = document.createElement('div');
+      badge.setAttribute(BADGE_ATTR, '1');
+      badge.className = 'voicenav-choice-badge';
+      // Hover explains it for anyone who reaches for the mouse instead.
+      badge.title = 'Voice navigation \u2014 say \u201c' + word + '\u201d ' +
+        (entry.hint || 'to press this');
+      // Sits just outside the control's top-left corner, clamped so a control flush against the
+      // top of the document doesn't push its label off-screen.
+      badge.style.left = Math.max(0, r.left + window.pageXOffset - 8) + 'px';
+      badge.style.top = Math.max(0, r.top + window.pageYOffset - 12) + 'px';
+
+      // textContent throughout: no markup is ever built from these strings.
+      const cue = document.createElement('span');
+      cue.className = 'voicenav-choice-badge-cue';
+      cue.textContent = 'say';
+      const said = document.createElement('span');
+      said.className = 'voicenav-choice-badge-word';
+      said.textContent = '\u201c' + word + '\u201d';
+
+      badge.appendChild(cue);
+      badge.appendChild(said);
+      document.body.appendChild(badge);
+      badgeEls.push(badge);
+    });
+  } catch (e) { /* nothing to label */ }
+}
+
+// The sidenav item for a destination, so a choice prompt can put its label where the user would
+// actually click to get there. The sidenav is otherwise excluded from control discovery
+// (NAV_REGION_SELECTOR) — this looks it up on purpose rather than making it addressable.
+export function findNavItem(label) {
+  try {
+    const nodes = document.querySelectorAll(NAV_REGION_SELECTOR + ' [class*="tab-wrapper"]');
+    const want = normalizePhrase(label);
+    for (let i = 0; i < nodes.length; i++) {
+      const text = (nodes[i].innerText || nodes[i].textContent || '').replace(/\s+/g, ' ').trim();
+      if (normalizePhrase(text) === want) return nodes[i];
+    }
+  } catch (e) { /* no sidenav on this screen */ }
+  return null;
+}
+
+// The controls sharing a duplicated label, in the same order they were numbered.
+export function getGroupControls(group) {
+  return getScreenControls().filter((c) => c.group === group && c.groupIndex >= 0)
+    .sort((a, b) => a.groupIndex - b.groupIndex);
 }

@@ -121,6 +121,9 @@ class Game:
             self.question = 1  # current question
             self.buzzer = ""  # username of person who buzzed
             self.prev_answers = []
+            # Canonical answer for the question that just ended, held for the whole gap so the
+            # client can always reveal it. Empty while a question is still in progress.
+            self.current_answer_text = ""
             self.last_answer_meta = None  # {qid, correct, answer, username} of the most recent answer() call
             self.points = {}
             if self.teams == 0:
@@ -172,7 +175,7 @@ class Game:
     # round #, question #, question time remaining, buzz time remaining, gap time remaining
     def gamestate(self):
         if not self.active_game:  # game is over
-            return [self.active_game, 0, 0, 0, 0, 0, 0, self.points]
+            return [self.active_game, 0, 0, 0, 0, 0, 0, self.points, [], ""]
         if self.active_gap[0]:  # between questions
             # if gap time is over, move to question
             if self.get_gap_time() < 0:
@@ -180,6 +183,7 @@ class Game:
                     ((self.round - 1) * self.questions_num) + self.question - 1
                 )
                 self.prev_answers = [] # clear previous answers
+                self.current_answer_text = ""  # reveal belongs to the question that just ended
 
                 self.socketio.emit(
                     "hlsupdate",
@@ -206,22 +210,42 @@ class Game:
                         if self.active_buzz[3] in team:
                             team[self.active_buzz[3]] -= 5
                 self.active_question[1] = self.active_question[1] + self.buzz_time
+                timed_out_user = self.active_buzz[3] if len(self.active_buzz) > 3 else ""
                 self.active_buzz = [False, 0, 0]
                 self.buzzer = ""
-                self.socketio.emit("answeredincorrectly", {}, to=self.gamecode)
+                # Flag the timeout so the client can say why the answer box locked, instead of
+                # just marking the player wrong for an answer they never got to send.
+                self.socketio.emit(
+                    "answeredincorrectly",
+                    {"username": timed_out_user, "timedOut": True},
+                    to=self.gamecode,
+                )
 
         if self.active_question[0]:  # in a question
             # if question time is over, check round & question number- go to gap OR to next round OR end game
             unlock_next = True
             if self.get_question_time() <= 0:
-                if len(self.prev_answers) == 0 or not self.prev_answers[-1][1] or self.prev_answers[-1][0] == 'Answered via classifier':
-                    try:
-                        correct_answer = requests.get(
-                            os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1])
-                        ).json()
-                        self.prev_answers.append([correct_answer['answer'], True])
-                    except Exception as e:
-                        print(f"Failed to fetch correct answer: {e}")
+                # Fetch the canonical answer unconditionally. It used to be fetched only when
+                # nobody had answered correctly, which meant a correct answer was never revealed
+                # — the client fell back to echoing the player's own text. That is wrong whenever
+                # the player's wording only fuzzy-matched (answers are judged at 85% token_set
+                # ratio, so "Mozart" scores as correct for "Wolfgang Amadeus Mozart"), and it
+                # showed nothing at all to players who never buzzed.
+                try:
+                    correct_answer = requests.get(
+                        os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1])
+                    ).json()
+                    self.current_answer_text = correct_answer.get('answer', '') or ''
+                except Exception as e:
+                    print(f"Failed to fetch correct answer: {e}")
+                    self.current_answer_text = ""
+                # Still add it to the answers list when nobody got it, so the list is not empty.
+                if self.current_answer_text and (
+                    len(self.prev_answers) == 0
+                    or not self.prev_answers[-1][1]
+                    or self.prev_answers[-1][0] == 'Answered via classifier'
+                ):
+                    self.prev_answers.append([self.current_answer_text, True])
                 self.question += 1
                 self.active_gap = [True, time.time()]
                 self.active_question = [False, 0]
@@ -263,7 +287,8 @@ class Game:
             self.get_gap_time(),
             self.buzzer,
             self.points,
-            self.prev_answers
+            self.prev_answers,
+            self.current_answer_text,
         ]
 
     # gets new question + tells HLS to get new question
@@ -354,7 +379,9 @@ class Game:
                     for team in self.points:
                         if username in team:
                             team[username] += 10
-                self.socketio.emit("answeredcorrectly", {}, to=self.gamecode)
+                self.socketio.emit(
+                    "answeredcorrectly", {"username": username}, to=self.gamecode
+                )
             else:
                 if self.teams == 0:
                     self.points[username] -= 5
@@ -362,7 +389,9 @@ class Game:
                     for team in self.points:
                         if username in team:
                             team[username] -= 5
-                self.socketio.emit("answeredincorrectly", {}, to=self.gamecode)
+                self.socketio.emit(
+                    "answeredincorrectly", {"username": username}, to=self.gamecode
+                )
             print(self.points)
             self.active_buzz = [False, 0]
             self.buzzer = ""
@@ -423,7 +452,9 @@ class Game:
                     for team in self.points:
                         if username in team:
                             team[username] += 10
-                self.socketio.emit("answeredcorrectly", {}, to=self.gamecode)
+                self.socketio.emit(
+                    "answeredcorrectly", {"username": username}, to=self.gamecode
+                )
             else:
                 if self.teams == 0:
                     self.points[username] -= 5
@@ -431,7 +462,9 @@ class Game:
                     for team in self.points:
                         if username in team:
                             team[username] -= 5
-                self.socketio.emit("answeredincorrectly", {}, to=self.gamecode)
+                self.socketio.emit(
+                    "answeredincorrectly", {"username": username}, to=self.gamecode
+                )
             print(self.points)
             self.active_buzz = [False, 0]
             self.buzzer = ""

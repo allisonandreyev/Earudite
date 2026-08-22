@@ -77,7 +77,8 @@ export const NAV_INTENTS = [
     // The sidenav calls this "Record" but the component is Shop.jsx — users say "record".
     // Bare "record"/"recording" is intentionally last-resort: those words collide with the RECORD
     // buttons in the transcript picker and the Recordings card on Profile.
-    phrases: ['go to record', 'open record', 'record menu', 'recording menu', 'record a question'],
+    phrases: ['go to record', 'open record', 'record menu', 'recording menu', 'record a question',
+      'go to recordings', 'open recordings', 'recordings tab', 'recording tab', 'my recordings'],
     bare: ['record', 'recording'],
     screen: SCREENS.RECORD,
     hash: 'record',
@@ -115,6 +116,17 @@ export const NAV_INTENTS = [
     hash: 'tutorial',
   },
 ];
+
+// "record menu" / "record navigate" / "navigate to record", for every destination that has a bare
+// name. Generated rather than hand-listed so a new NAV_INTENT can't quietly miss the phrasing that
+// distinguishes "go to the menu" from "press the button of the same name".
+NAV_INTENTS.forEach((intent) => {
+  (intent.bare || []).forEach((word) => {
+    [word + ' menu', word + ' navigate', 'navigate to ' + word].forEach((phrase) => {
+      if (intent.phrases.indexOf(phrase) === -1) intent.phrases.push(phrase);
+    });
+  });
+});
 
 // Same intents, exposing only their bare names — matched after on-screen controls.
 export const NAV_BARE_INTENTS = NAV_INTENTS
@@ -252,4 +264,114 @@ export function matchTiered(transcript, registeredIntents, screenControls) {
     if (m) return m;
   }
   return null;
+}
+
+
+// Words for picking one of several identical controls. Both series are accepted because people
+// reach for either ("two" / "second"), and each is a SINGLE word — the bare form matters, since a
+// two-word command has to survive the recognizer splitting an utterance in half.
+export const ORDINAL_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
+export const ORDINAL_NAMES = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth'];
+
+// What the recognizer hands back for a spoken number, which is very often NOT the word.
+//
+// Web Speech writes numbers as digits once they follow another word — "record one" comes back as
+// "record 1" — and the small numbers have common homophones it picks by context it doesn't have
+// here ("to"/"too" for two, "for" for four, "won" for one). Every one of these was a choice that
+// silently did nothing, so each ordinal answers to its digit and its soundalikes as well.
+export const ORDINAL_ALIASES = [
+  ['1', 'won'],
+  ['2', 'to', 'too'],
+  ['3'],
+  ['4', 'for', 'fore'],
+  ['5'],
+  ['6'],
+  ['7'],
+  ['8', 'ate'],
+];
+
+// Phrases that address the nth control (1-based) of a duplicated group by name and position:
+// "record two", "record number 2", "record second". Label-prefixed only — the bare "two" belongs
+// to choiceIntents, which is registered solely while a choice is pending, so it can never fire on
+// a screen that isn't asking which one.
+export function groupOrdinalPhrases(label, n) {
+  const i = n - 1;
+  if (i < 0 || i >= ORDINAL_WORDS.length) return [];
+  const forms = [ORDINAL_WORDS[i], ORDINAL_NAMES[i]].concat(ORDINAL_ALIASES[i]);
+  const out = [];
+  forms.forEach((f) => {
+    out.push(label + ' ' + f);
+    out.push(label + ' number ' + f);
+  });
+  return out;
+}
+
+// Intents for choosing among `count` controls that share `label`.
+//
+// Registered only while a choice is actually pending, so bare "two" can never fire anything on a
+// screen that isn't asking which one. `index` is 0-based into the group, in DOM order.
+export function choiceIntents(label, count) {
+  const out = [];
+  const n = Math.min(count, ORDINAL_WORDS.length);
+  for (let i = 0; i < n; i++) {
+    const forms = [ORDINAL_WORDS[i], ORDINAL_NAMES[i]].concat(ORDINAL_ALIASES[i]);
+    const bare = ['the ' + ORDINAL_NAMES[i]];
+    forms.forEach((f) => { bare.push(f); bare.push('number ' + f); });
+    out.push({
+      id: 'choice.' + (i + 1),
+      label: label + ' ' + ORDINAL_WORDS[i],
+      index: i,
+      phrases: bare.concat(groupOrdinalPhrases(label, i + 1)),
+    });
+  }
+  return out;
+}
+
+// The menu this group of controls shares its name with, if any.
+//
+// "Record" is both four buttons on the transcript picker and a place in the sidenav, and while the
+// picker is up the buttons win — correctly, but that left no way to say "actually, take me to the
+// menu". This pairs the two so the choice prompt can offer it alongside the buttons.
+export function navIntentForGroup(groupKey) {
+  const key = normalize(groupKey);
+  for (const intent of NAV_INTENTS) {
+    const names = (intent.bare || []).concat([intent.label]);
+    for (const name of names) {
+      if (normalize(name) === key) return intent;
+    }
+  }
+  return null;
+}
+
+// The extra "take me to the menu instead" option offered during a choice. Kept out of
+// choiceIntents so a group with no matching destination simply doesn't get one.
+export function menuChoiceIntent(label, navIntent) {
+  return {
+    id: 'choice.menu',
+    label: navIntent.label + ' menu',
+    navIntent: navIntent,
+    phrases: ['menu', 'navigate', 'go to menu', 'open menu', 'the menu',
+      label + ' menu', label + ' navigate'],
+  };
+}
+
+// Could what we just matched be the first half of a longer command that is still arriving?
+//
+// Web Speech delivers a sentence in pieces, so "record two" reaches us as "record" and only then
+// as "record two". Acting on the first piece ran the wrong command AND consumed the utterance, so
+// the trailing word arrived alone and matched nothing — the reason two-word commands appeared to
+// need a long pause between them. Callers use this to wait for the utterance to settle instead.
+export function hasExtension(matchedPhrase, tiers) {
+  if (!matchedPhrase) return false;
+  const prefix = matchedPhrase + ' ';
+  for (const tier of tiers) {
+    if (!tier) continue;
+    for (const intent of tier) {
+      for (const phrase of intent.phrases) {
+        const p = normalize(phrase);
+        if (p.length > matchedPhrase.length && p.indexOf(prefix) === 0) return true;
+      }
+    }
+  }
+  return false;
 }

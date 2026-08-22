@@ -2354,17 +2354,19 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
             )
             return {doc["qb_id"] for doc in cursor}
 
+        # Since the AUDITA import (maintenance/import_audita.py), every question ships with its
+        # dataset clip already attached, so the whole pool lives in RecordedQuestions and
+        # UnrecordedQuestions is empty. Each branch below therefore falls back to the other
+        # collection rather than returning "empty_qids" — otherwise the record flow, and in
+        # particular its category picker, has nothing to offer.
         if pool == "unrecorded":
-            question_ids = list(_unrec_ids())
+            question_ids = list(_unrec_ids()) or list(_rec_ids())
         elif pool == "recorded":
             # Fall back to an unrecorded question if nothing qualifies for re-recording (e.g. this
             # difficulty/category band has no recordings yet) so the caller always gets a candidate.
             question_ids = list(_rec_ids()) or list(_unrec_ids())
         elif category:
-            # Legacy default (no `pool` given): category-filtered requests are scoped to
-            # UnrecordedQuestions only — RecordedQuestions is the Play-flow pool and stays out of
-            # this entirely, regardless of difficulty banding.
-            question_ids = list(_unrec_ids())
+            question_ids = list(_unrec_ids()) or list(_rec_ids())
         else:
             # Legacy default (no `pool` given): pool both collections together.
             question_ids = list(_unrec_ids() | _rec_ids())

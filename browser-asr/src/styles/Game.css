@@ -132,6 +132,11 @@
   text-align: left;
   padding: 1rem;
   overflow-y: auto;
+  /* The sound-captioning prompts are multi-line (an instruction, then an answer format, then a
+     worked example). Without pre-wrap those newlines collapse and the whole prompt runs together
+     as one paragraph. wrap, not pre, so long lines still reflow to the box width. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .game-menubox {
@@ -366,6 +371,11 @@
   font-weight: bold;
   font-size: 1rem;
   color: #333;
+  /* AUDITA answers run long ("Labels with acoustic features: soft, high-pitched beep -> Signal;
+     low, rumbling noise -> Engine") and some carry real line breaks. Keep them readable instead
+     of letting them overflow the standings column. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .game-keybinds-card-wrapper {

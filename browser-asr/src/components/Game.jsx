@@ -1,6 +1,6 @@
 import "../styles/Game.css";
 import "../styles/WhitePanel.css";
-import React, { useState, useEffect, useReducer } from "react";
+import React, { useState, useEffect, useReducer, useRef } from "react";
 import { useRecoilValue, useSetRecoilState } from "recoil";
 import {
   SCREEN,
@@ -383,6 +383,8 @@ function Game() {
       inGame: true,
       answerText: "",
       prevAnswers: [],
+      // Canonical answer for the question that just ended, sent by the server for the whole gap.
+      correctAnswer: "",
       socket: useRecoilValue(SOCKET),
       points: new Map([[username, 0]]),
       lobby: useRecoilValue(LOBBY_CODE),
@@ -425,11 +427,33 @@ function Game() {
   const [answerText, setAnswerText] = useState("");
   const [lastSubmittedAnswer, setLastSubmittedAnswer] = useState("");
   const [lastAnswerCorrect, setLastAnswerCorrect] = useState(null);
+  // True when this player's buzz expired before they sent anything.
+  const [lastBuzzTimedOut, setLastBuzzTimedOut] = useState(false);
+
+  // The socket listeners are registered ONCE (see the effect below). These refs give them current
+  // values without putting those values in the effect's dependency list. Declared here, ahead of
+  // that effect, so the reference order reads correctly.
+  const stateRef = useRef(state);
+  const gameSettingsRef = useRef(gameSettings);
+  const usernameRef = useRef(username);
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { gameSettingsRef.current = gameSettings; }, [gameSettings]);
+  useEffect(() => { usernameRef.current = username; }, [username]);
+
+  // The reveal panel describes one question. Clear it when the next one starts, otherwise the
+  // previous question's "Your answer" lingers through the whole of the next question.
+  useEffect(() => {
+    setLastSubmittedAnswer("");
+    setLastAnswerCorrect(null);
+    setLastBuzzTimedOut(false);
+  }, [state.question, state.round]);
 
   useEffect(() => {
     const buzzerListener = (data) => {
+      // Guard the pause: if the <video> is momentarily absent this used to throw, and the
+      // setState below — the line that actually puts the UI into the buzzed-in state — never ran.
       var video = document.getElementById("hls");
-      video.pause();
+      if (video) video.pause();
       setState({ buzzer: data });
     };
 
@@ -450,25 +474,34 @@ function Game() {
         gapTime: data[5].toFixed(1),
         buzzer: data[6],
         points: data[7],
-        prevAnswers: data[8],
+        prevAnswers: data[8] || [],
+        correctAnswer: data[9] || "",
       });
     };
 
+    // These two are broadcast to the entire room. Only adopt the verdict when it is about this
+    // player — otherwise another player answering flipped your "Correct answer" line.
+    const isMine = (data) => !data || !data.username || data.username === usernameRef.current;
+
     const answeredIncorrectlyListener = (data) => {
       var video = document.getElementById("hls");
-      if(state.questionTime > gameSettings['post_buzz_time']) {
+      if (video && stateRef.current.questionTime > gameSettingsRef.current['post_buzz_time']) {
         video.play();
       }
-      setLastAnswerCorrect(false);
+      if (isMine(data)) {
+        setLastAnswerCorrect(false);
+        if (data && data.timedOut) setLastBuzzTimedOut(true);
+      }
     };
 
     const answeredCorrectlyListener = (data) => {
-      setLastAnswerCorrect(true);
+      if (isMine(data)) setLastAnswerCorrect(true);
     };
 
     const hlsListener = (data) => {
       var div = document.getElementById("transcript-box");
-      if (div) div.innerHTML = "";
+      if (div) div.textContent = "";
+      lastCueRef.current = "";
       // console.log(data["token"]);
       // console.log(data["rid"]);
       setToken(data["token"]);
@@ -477,24 +510,14 @@ function Game() {
       setAnswerText("");
       setLastSubmittedAnswer("");
       setLastAnswerCorrect(null);
+      setLastBuzzTimedOut(false);
       setTotalTimeBeenSet(false);
     };
 
     const hlsPlayListener = (data) => {
       var video = document.getElementById("hls");
-      video.play();
+      if (video) video.play();
     };
-
-    var video = document.getElementById("hls");
-    if (video) {
-      video.addEventListener("play", function () {
-        navigator.mediaSession.playbackState = "playing";
-      });
-
-      video.addEventListener("pause", function () {
-        navigator.mediaSession.playbackState = "paused";
-      });
-    }
 
     state.socket.on("buzzed", buzzerListener);
     state.socket.on("gamestate", gameStateListener);
@@ -511,7 +534,28 @@ function Game() {
       state.socket.off("hlsupdate", hlsListener);
       state.socket.off("hlsplay", hlsPlayListener);
     };
-  });
+    // Registered once per socket. This effect previously had NO dependency array, so it tore down
+    // and re-attached all six handlers on every single render — and the server emits gamestate
+    // roughly ten times a second, so that was ~10 full re-registrations per second for the whole
+    // game, on top of leaking two <video> listeners each time (they were added here but only ever
+    // removed by the socket cleanup, which did not cover them). The accumulated listeners and
+    // churn are what made the page progressively less responsive to a Buzz click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.socket]);
+
+  // The media-session hooks belong to the <video>, not to the socket, and need their own cleanup.
+  useEffect(() => {
+    const video = document.getElementById("hls");
+    if (!video) return;
+    const onPlay = () => { navigator.mediaSession.playbackState = "playing"; };
+    const onPause = () => { navigator.mediaSession.playbackState = "paused"; };
+    video.addEventListener("play", onPlay);
+    video.addEventListener("pause", onPause);
+    return () => {
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("pause", onPause);
+    };
+  }, []);
 
   //Confetti
   const [prevState, setPrevState] = useState(state);
@@ -538,6 +582,10 @@ function Game() {
     },
   });
 
+  // Last cue rendered into the transcript box, so a repeated cuechange does not duplicate it.
+  const lastCueRef = useRef("");
+
+
   // Attach cuechange listeners via addtrack so they survive hls.js detach/reattach
   // between questions. useQuestion's loadedmetadata approach is removed on pause,
   // breaking text display for question 2+.
@@ -546,13 +594,22 @@ function Game() {
     if (!video) return;
 
     function onCueChange(e) {
-      const cue = e.currentTarget?.activeCues?.[0]?.text;
-      if (!cue) return;
+      const raw = e.currentTarget?.activeCues?.[0]?.text;
+      if (!raw) return;
       const div = document.getElementById("transcript-box");
       if (!div) return;
-      const parts = div.innerHTML.split(" ");
-      if (cue === parts[parts.length - 1]) return;
-      div.innerHTML = div.innerHTML + "  \n" + cue;
+      // Strip WebVTT markup ("<v Speaker 0>", <b>, <i>, timestamps). innerHTML used to hide these
+      // by parsing them as unknown elements; textContent would print them verbatim.
+      const cue = raw.replace(/<[^>]*>/g, "").trim();
+      if (!cue) return;
+      // Dedupe against the whole previous cue. The old check split on spaces and compared only
+      // the final word, so any multi-word cue slipped through and was appended repeatedly.
+      if (cue === lastCueRef.current) return;
+      lastCueRef.current = cue;
+      // textContent, not innerHTML: cue text is dataset content, and 687 of the sound-captioning
+      // prompts contain bracketed answer-format examples. The box is white-space: pre-wrap, so
+      // the newlines inside a multi-line cue render as real line breaks.
+      div.textContent = div.textContent ? div.textContent + "\n" + cue : cue;
     }
 
     function onAddTrack(e) {
@@ -704,31 +761,46 @@ function Game() {
               buzzer={state.buzzer}
               buzzTime={state.buzzTime}
             />
-            {lastSubmittedAnswer && (
+            {/* Shown for the whole gap after each question. The panel is driven by the server's
+                canonical answer (gamestate data[9]) rather than by whether this player happened
+                to answer, so the reveal appears every time the countdown ends — including for
+                players who never buzzed. "Your answer" is the only part that depends on having
+                submitted something. */}
+            {(state.correctAnswer || lastSubmittedAnswer || lastBuzzTimedOut) && (
               <div className="game-team-wrapper game-team-standings game-submitted-answer-panel">
-                <div className="game-submitted-answer-row">
-                  <span className="game-submitted-answer-label">Your answer:</span>
-                  <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
-                </div>
+                {lastBuzzTimedOut && !lastSubmittedAnswer && (
+                  <div className="game-submitted-answer-row">
+                    <span className="game-submitted-answer-label">Your answer:</span>
+                    <span className="game-submitted-answer-text">
+                      Buzz timed out — no answer sent
+                    </span>
+                  </div>
+                )}
+                {lastSubmittedAnswer && (
+                  <div className="game-submitted-answer-row">
+                    <span className="game-submitted-answer-label">Your answer:</span>
+                    <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
+                    {lastAnswerCorrect === true && (
+                      <CheckIcon style={{ color: "#B0F5AB" }} />
+                    )}
+                    {lastAnswerCorrect === false && (
+                      <CloseIcon style={{ color: "#FC94A1" }} />
+                    )}
+                  </div>
+                )}
                 {(() => {
-                  if (lastAnswerCorrect === true) {
-                    return (
-                      <div className="game-submitted-answer-row">
-                        <span className="game-submitted-answer-label">Correct answer:</span>
-                        <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
-                      </div>
-                    );
-                  }
-                  const lastTrue = [...state.prevAnswers].reverse().find(([, correct]) => correct);
-                  if (lastTrue) {
-                    return (
-                      <div className="game-submitted-answer-row">
-                        <span className="game-submitted-answer-label">Correct answer:</span>
-                        <span className="game-submitted-answer-text">{lastTrue[0]}</span>
-                      </div>
-                    );
-                  }
-                  return null;
+                  // Never echo the player's own text here: answers are judged by fuzzy match, so
+                  // a "correct" answer is often only a partial of the real one.
+                  const canonical =
+                    state.correctAnswer ||
+                    ([...state.prevAnswers].reverse().find(([, correct]) => correct) || [])[0];
+                  if (!canonical) return null;
+                  return (
+                    <div className="game-submitted-answer-row">
+                      <span className="game-submitted-answer-label">Correct answer:</span>
+                      <span className="game-submitted-answer-text">{canonical}</span>
+                    </div>
+                  );
                 })()}
               </div>
             )}

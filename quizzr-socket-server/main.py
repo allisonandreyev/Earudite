@@ -79,6 +79,38 @@ MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # minimum buffered audio to
 
 # SHARED BETWEEN THREADS
 current_lobby = {}  # UID : room name
+
+
+def resolve_lobby(username):
+    """
+    Lobby code for a user, re-deriving it when a reconnect dropped the mapping.
+
+    Socket.IO reconnects on any brief interruption — a backgrounded tab, a network blip — and the
+    disconnect handler used to pop the player out of `current_lobby` unconditionally. Nothing
+    re-registered them on the way back in, so every later `current_lobby[username]` raised
+    KeyError and the handler died: buzzing and answering silently stopped working for the rest of
+    the game, by mouse and by voice alike.
+
+    Returns None if the user genuinely is not in a lobby.
+    """
+    lobbycode = current_lobby.get(username)
+    if lobbycode is not None:
+        return lobbycode
+
+    for code, lob in lobbies.items():
+        try:
+            players = lob.get_players_list() or []
+        except Exception:
+            continue
+        if username in players:
+            # Re-establish the mapping and the room membership for the new sid.
+            current_lobby[username] = code
+            clients[request.sid] = username
+            reverse_clients[username] = request.sid
+            join_room(code)
+            print(f"Recovered lobby {code} for reconnected user {username}")
+            return code
+    return None
 usernames = {}  # UID : username
 uids = {}  # username : UID
 lobbies = {}  # room name : lobby object
@@ -217,6 +249,19 @@ def clean_lobbies_and_games(sleep_time=30):  # cleans dead lobbies and games (0 
                         for player in team:
                             add_score(player, team[player])
 
+                # Release every seat this game held. Players who leave cleanly are removed by
+                # leave_lobby, but a player who drops mid-game now keeps their current_lobby entry
+                # on purpose (so a reconnect can resume) — without this, that entry would outlive
+                # the game and only_connection() would refuse to let them into a new lobby.
+                lob = lobbies.get(gamecode)
+                if lob is not None:
+                    try:
+                        for player in lob.get_players_list() or []:
+                            if current_lobby.get(player) == gamecode:
+                                current_lobby.pop(player, None)
+                    except Exception as e:
+                        print(f'Could not release seats for {gamecode}: {e}')
+
                 lobbies.pop(gamecode, None)
                 games.pop(gamecode, None)
                 print('Closed game ' + str(gamecode))
@@ -232,7 +277,10 @@ def sessions():
 @socketio.on('lobbyloading')  # makes user in lobby go to loading screen
 def lobby_loading(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
     username = user['username']
     emit('lobbyloading', {}, to=lobby)
 
@@ -298,7 +346,10 @@ def join_lobby(json, methods=['GET', 'POST']):
 @socketio.on('switchteam')
 def switch_team(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     result = lobbies[lobby].switch_team(json['user'])
     if result:
@@ -312,7 +363,10 @@ def switch_team(json, methods=['GET', 'POST']):
 @socketio.on('updatesettings')
 def update_settings(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     lobbies[lobby].update_settings(json['settings'])
     emit('lobbystate', lobbies[lobby].state(), to=lobby)
@@ -343,7 +397,10 @@ def leave_lobby(json, methods=['GET', 'POST']):
 def start_game(json, methods=['GET', 'POST']):
     # Start game with correct lobby parameters according to key
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     single_game = game.Game(lobbies[lobby], socketio)
     if single_game.good_game:
@@ -357,7 +414,10 @@ def start_game(json, methods=['GET', 'POST']):
 @socketio.on('buzz')
 def buzz(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
     username = user['username']
 
     buzzed = games[lobby].buzz(username)
@@ -374,7 +434,10 @@ def buzz(json, methods=['GET', 'POST']):
 def answer(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
     username = user['username']
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     # Snapshot the streamed answer audio before game.answer() yields to eventlet
     sid = request.sid
@@ -399,7 +462,10 @@ def answer(json, methods=['GET', 'POST']):
 def answer(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
     username = user['username']
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
     vote = json['vote']
     print(username + " rated a recording " + vote)
     if lobby in games.keys():
@@ -416,7 +482,10 @@ def answer(json, methods=['GET', 'POST']):
 def audioanswer(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
     username = user['username']
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     transcription = json.get('transcription', '')
     answered = games[lobby].classifier_answer(username, transcription)
@@ -449,10 +518,22 @@ def user_disconnected():
     if username is None:
         return
 
-    lobby = current_lobby.pop(username, None)
+    lobby = current_lobby.get(username)
     if lobby is None:
         return
 
+    # A disconnect during a live game is almost always a reconnect in progress, not someone
+    # quitting. Dropping them here removed the current_lobby entry that buzz/answer depend on and
+    # left the rest of the game unplayable for them. Leave the mapping alone; the reconnect keeps
+    # the same username, and resolve_lobby re-joins the room on their next action. Genuinely
+    # abandoned games are still reaped by clean_lobbies_and_games.
+    game_in_progress = lobby in games and games[lobby].active_game
+    if game_in_progress:
+        clients.pop(request.sid, None)
+        print(f"{username} disconnected mid-game in {lobby}; keeping their seat for reconnect")
+        return
+
+    current_lobby.pop(username, None)
     leave_room(lobby)
 
     if lobby not in lobbies:
@@ -537,7 +618,10 @@ def stop_audio_stream(data):
 def audioanswerupload():
     user = get_user(request.form.get("auth"))
     username = user['username']
-    lobby = current_lobby[user['username']]
+    lobby = resolve_lobby(user['username'])
+    if lobby is None:
+        emit('alert', ['error', 'You are not in a lobby'])
+        return
 
     # get qid using the question/round captured by the client at buzz time
     current_game = games[lobby]

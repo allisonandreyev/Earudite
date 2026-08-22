@@ -71,7 +71,9 @@ Open [http://localhost:3000](http://localhost:3000) to view the app.
 
 ## Notes
 
-- **Audio source:** Audio clips come from the [Pinafore/audio\_data](https://github.com/Pinafore/audio_data) GitHub repo via `combined (1).json`. Audio is matched to questions by **question text** (exact/prefix match), not by `qb_id`.
+- **Question pool:** All 9,686 questions come from the AUDITA dataset in the [Pinafore/audio\_data](https://github.com/Pinafore/audio_data) repo (`combined (1).json`), loaded by `quizzr-server/maintenance/import_audita.py`. Each question *is* an audio clip: the text is a short prompt ("Name the composer.") and the clip carries the content. The importer stores four multiple-choice options per question; answer checking still uses the fuzzy text match.
+- **Audio source:** Every question document carries its clip's URL in `audioUrl`, and its `Audio` document is joined by `qb_id`. The HLS server resolves the clip **by ID** — never by question text. Text matching was previously used and was unsound: only 3,768 of the question strings are distinct, and one string covers 1,320 different clips.
+- **Reimporting:** `qb_id` is a deterministic hash of each entry's content, so the import is idempotent. Run `python import_audita.py --dry-run --verify-audio 50` to preview and confirm clips resolve; `--replace` backs up `UnrecordedQuestions`, `RecordedQuestions`, and `Audio` to `quizzr-server/question_backups/` before writing. User-contributed recordings in `Audio` are never deleted.
 - **Stuck workers:** If quizzr-server becomes unresponsive, kill all workers with `lsof -ti :5110 | xargs kill -9` and restart.
 - **Log files:** `/tmp/quizzr_server.log`, `/tmp/hls_server.log`, `/tmp/socket_server.log`
 

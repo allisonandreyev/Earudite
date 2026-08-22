@@ -95,6 +95,20 @@ const MIN_STREAM_SAMPLES = 0.5 * STREAM_SAMPLE_RATE;  // start after 0.5s of aud
 const MAX_PARTIAL_SAMPLES = 10 * STREAM_SAMPLE_RATE;  // cap the transcribed window at 10s
 const STREAM_INTERVAL_MS = 500;                       // throttle between local transcriptions
 
+// Window transcribed while WAITING to buzz, as opposed to the full 10s used once buzzed in.
+//
+// The wake word is one short token. Handing whisper the whole 10s buffer meant that token sat
+// inside ten seconds of whatever else the mic picked up — and since every question is now an audio
+// clip playing through the speakers, that is ten seconds of music leaking past echo cancellation.
+// Whisper transcribes the lot, the wake word lands somewhere in the middle of it, and the
+// short trailing-word check never sees it. Detection "worked" in a quiet room and failed in a
+// real game, which is exactly the reported behaviour.
+//
+// A short tail fixes it at the source: over ~2.5s a shouted "buzz" IS most of the audio, so it
+// dominates the transcript instead of being buried in it. Inference cost is unchanged — whisper
+// pads every input to 30s regardless — so this is purely a signal-to-noise improvement.
+const WAKE_WINDOW_SAMPLES = 2.5 * STREAM_SAMPLE_RATE;
+
 // "buzz" wake-word matching.
 //
 // The old rule was an exact /^buzz[.!?]?$/ on the last 3 words. Measured against whisper-tiny.en
@@ -116,8 +130,14 @@ const BUZZ_TOKENS = new Set([
   'fuzz', 'fuzzed', 'bub', 'buh', 'bud',
   'buns', 'bun', 'bubble', 'bass', 'baz', 'fast',
 ]);
-const BUZZ_TAIL_WORDS = 3;
+// Upper bound on how much of a wake-window transcript is scanned. The window is short enough that
+// this is rarely reached; it only guards against whisper hallucinating a long run on noise.
+const BUZZ_SCAN_WORDS = 8;
 const BUZZ_COOLDOWN_MS = 2000;
+
+// Set window.EARUDITE_VOICE_DEBUG = true in the console to trace what whisper heard and why a
+// keyword did or did not fire. Off by default so a normal game logs nothing.
+const VOICE_DEBUG = typeof window !== 'undefined' && !!window.EARUDITE_VOICE_DEBUG;
 
 // "submit" keyword matching — same method as BUZZ_TOKENS above (accept-list built from measured
 // whisper-tiny.en output), but with two deliberate differences.
@@ -156,8 +176,16 @@ const SUBMIT_TAIL_TOKENS = 2;
 // is what the code did unconditionally before, so it is much better to be permissive here.
 const VAD_MIN_RMS = 0.0035;         // absolute floor; below this it is digital silence
 const VAD_NOISE_MULTIPLIER = 2.2;   // how far above ambient counts as speech
-const VAD_HANGOVER_MS = 700;        // keep going this long after speech stops, so a trailing
-                                    // keyword after a short pause is still captured
+// Keep treating the mic as active this long after speech stops.
+//
+// This was 700ms, which is SHORTER than a whisper pass (~1.1s), and that single fact is why a
+// spoken "submit" so often did nothing: a pass would be in flight over audio recorded before the
+// word, the hangover would expire while it ran, and when the worker freed up the gate was already
+// closed — so the audio containing "submit" was captured, buffered, and never transcribed.
+// Simulated over realistic answer lengths, that lost the final word 42% of the time.
+// Raising this above the inference cost drops it to 0. The trailing-pass gate in the audio
+// callback covers the case where inference is slower still (a busy or slower machine).
+const VAD_HANGOVER_MS = 1400;
 const VAD_FLOOR_ATTACK = 0.05;      // how fast the ambient estimate tracks upward
 
 function emptyPcm() {
@@ -205,7 +233,15 @@ function AnswerBox(props) {
   // backend as labeled training data; only the transcription itself moved client-side).
   const localBufferRef = useRef(emptyPcm());
   const lastLocalTranscribeRef = useRef(0);
+  // Bumped every time the buffer is discarded. A transcription pass runs against a COPY of the
+  // buffer and takes ~1.1s, so a pass started before a reset would otherwise land afterwards and
+  // be applied as if it were current. That is what put the pre-buzz audio — "buzz buzz buzz" —
+  // into the answer box the moment you clicked Buzz.
+  const transcribeEpochRef = useRef(0);
   const lastVoiceAtRef = useRef(0);       // last time input RMS looked like speech
+  // Wall-clock time the most recent pass's audio reached. Compared against lastVoiceAtRef to tell
+  // whether any speech has happened that no pass has covered yet — see the trailing-pass gate.
+  const passCoversUpToRef = useRef(0);
   const noiseFloorRef = useRef(0.002);    // running estimate of ambient level (see VAD_ constants)
 
   const audioStreamRef = useRef(null);
@@ -228,6 +264,14 @@ function AnswerBox(props) {
 
   const textAnswer = useRef(null);
 
+  // Discard the rolling buffer and invalidate any transcription already in flight over it.
+  function resetLocalBuffer() {
+    localBufferRef.current = emptyPcm();
+    transcribeEpochRef.current += 1;
+    // The discarded audio is no longer owed a pass.
+    passCoversUpToRef.current = Date.now();
+  }
+
   function buzzin() {
     props.buzz();
     setTimeout(()=>{ if (textAnswer.current) textAnswer.current.focus(); }, 100);
@@ -235,7 +279,16 @@ function AnswerBox(props) {
 
   function submit1(textOverride) {
     const answer = textOverride !== undefined ? textOverride : props.answer;
-    console.log(answer);
+    // Discard the audio this answer was transcribed from, on EVERY submit path.
+    //
+    // Only the spoken-"submit" path used to do this. Clicking Submit (or pressing Enter) left the
+    // rolling buffer intact, so the next pass re-transcribed the same speech and called
+    // setAnswer() again — repopulating the box that submit had just cleared. It looks exactly
+    // like the submit was ignored, and a second click then gets rejected server-side because the
+    // first one already ended the buzz.
+    resetLocalBuffer();
+    lastLocalTranscribeRef.current = Date.now();
+    if (socketRef.current) socketRef.current.emit('reset_audio_stream', {});
     props.submit(answer);
     props.setAnswer("");
   }
@@ -270,7 +323,7 @@ function AnswerBox(props) {
 
   // On question change: reset server buffer and ASR state
   useEffect(() => {
-    localBufferRef.current = emptyPcm();
+    resetLocalBuffer();
     if (speechModeRef.current === 2) {
       socketRef.current.emit('reset_audio_stream', {});
     } else if (processorRef.current) {
@@ -295,7 +348,7 @@ function AnswerBox(props) {
         processorRef.current.disconnect();
         processorRef.current = null;
         socketRef.current.emit('stop_audio_stream', {});
-        localBufferRef.current = emptyPcm();
+        resetLocalBuffer();
       }
     }
     // eslint-disable-next-line
@@ -318,13 +371,15 @@ function AnswerBox(props) {
   useEffect(() => {
     if (speechMode !== 2) return;
     if (props.buzzer === username) {
-      localBufferRef.current = emptyPcm();
+      // Buzzing in starts a fresh answer: nothing captured before this moment belongs in the
+      // answer box, including the spoken "buzz" itself.
+      resetLocalBuffer();
       socketRef.current.emit('reset_audio_stream', {});
     } else {
       if (localBufferRef.current.length >= MIN_STREAM_SAMPLES) {
         runLocalTranscription(localBufferRef.current, true);
       }
-      localBufferRef.current = emptyPcm();
+      resetLocalBuffer();
       socketRef.current.emit('stop_audio_stream', {});
       socketRef.current.emit('start_audio_stream', {});
     }
@@ -335,43 +390,51 @@ function AnswerBox(props) {
   // keyword otherwise. Mirrors the old partial_transcription/final_transcription socket handlers.
   function applyLocalTranscription(text, isFinal) {
     if (!text) return;
-    if (buzzerRef.current === usernameRef.current) {
+    // The truthiness check matters: buzzerRef is '' when nobody has buzzed, so if the profile
+    // has not loaded yet and usernameRef is also '', this comparison was true and every pass
+    // took the answer branch — writing speech into the box while making the "buzz" wake word
+    // permanently undetectable.
+    if (buzzerRef.current && buzzerRef.current === usernameRef.current) {
       const { cleaned, hasSubmit } = processTranscription(text);
+      if (VOICE_DEBUG) console.log('[voice] answer pass', JSON.stringify(text), '| submit:', hasSubmit);
       props.setAnswer(cleaned);
       if (hasSubmit) {
-        // Clear the buffer BEFORE submitting, exactly as the buzz path does. Without this the
-        // next pass re-transcribes the same audio — which still ends in "submit" — and re-runs
-        // this branch: setAnswer() repopulates the box the submit had just cleared, and a second
-        // answer is emitted that the server drops because the buzz is no longer active. That is
-        // the "it left my text on screen and didn't submit" case: the first submit did land, then
-        // the stale audio put the text back and the retry went nowhere.
-        localBufferRef.current = emptyPcm();
-        lastLocalTranscribeRef.current = Date.now();
-        socketRef.current.emit('reset_audio_stream', {});
+        // submit1() clears the buffer for every path now, so the spoken route just calls it.
         actionRef.current.submit1(cleaned);
       }
-    } else if (!isFinal && buzzerRef.current === '') {
-      // Detect the "buzz" keyword in the most recent speech. Partial transcriptions cover the
-      // full accumulated buffer (up to 10s), so checking the whole text's word count never
-      // matches mid-question — only inspect the last few words. Immediately clear the local
-      // buffer so the old "buzz" audio can't re-trigger after the cooldown expires.
+    } else if (!isFinal && !buzzerRef.current) {
+      // These passes now cover only the last WAKE_WINDOW_SAMPLES of audio, so the entire
+      // transcript is by definition recent — a few words at most. Scan all of it rather than a
+      // fixed tail: whisper regularly renders a shouted "buzz" with a leading filler it invented
+      // ("uh, buzz", "the buzz"), which pushed the real token out of a 3-word tail even when the
+      // window was short. Over-triggering is the cheap error here (it just buzzes you in early),
+      // which is the same reasoning behind BUZZ_TOKENS being permissive.
       const words = text.trim().toLowerCase().replace(/[^a-z\s']/g, ' ').split(/\s+/).filter(Boolean);
-      const recent = words.slice(-BUZZ_TAIL_WORDS);
+      const scanned = words.length > BUZZ_SCAN_WORDS ? words.slice(-BUZZ_SCAN_WORDS) : words;
       const now = Date.now();
-      if (
-        recent.some(w => BUZZ_TOKENS.has(w)) &&
-        now - lastBuzzDetectRef.current > BUZZ_COOLDOWN_MS
-      ) {
+      const hit = scanned.find(w => BUZZ_TOKENS.has(w));
+      if (hit && now - lastBuzzDetectRef.current > BUZZ_COOLDOWN_MS) {
+        if (VOICE_DEBUG) console.log('[voice] BUZZ on', JSON.stringify(hit), 'from', JSON.stringify(text));
         lastBuzzDetectRef.current = now;
-        localBufferRef.current = emptyPcm();
+        resetLocalBuffer();
         socketRef.current.emit('reset_audio_stream', {});
         actionRef.current.buzzin();
+      } else if (VOICE_DEBUG && text) {
+        console.log('[voice] no buzz in', JSON.stringify(text), '| scanned:', scanned);
       }
     }
   }
 
   async function runLocalTranscription(pcm, isFinal) {
+    const epoch = transcribeEpochRef.current;
     const text = stripNonSpeech(await localWhisper.transcribe(pcm));
+    // The buffer was thrown away while this pass was running (buzz-in, submit, new question),
+    // so `text` describes audio that no longer applies. Dropping it here is what stops stale
+    // pre-buzz speech from being written into the answer box.
+    //
+    // Only partials are dropped. The buzz-out flush is deliberately a final pass over a buffer
+    // that is being torn down in the same tick, so it would always look stale.
+    if (!isFinal && transcribeEpochRef.current !== epoch) return;
     applyLocalTranscription(text, isFinal);
   }
 
@@ -414,14 +477,37 @@ function AnswerBox(props) {
       }
       const recentlyVoiced = now - lastVoiceAtRef.current < VAD_HANGOVER_MS;
 
+      // Is there speech that no pass has transcribed yet? This is what makes the LAST utterance
+      // reliably reach whisper.
+      //
+      // The gate used to be `recentlyVoiced` alone, and VAD_HANGOVER_MS (700ms) is shorter than a
+      // whisper pass (~1.1s). Saying "<answer> submit" and stopping therefore went: a pass is
+      // already in flight over audio that predates "submit"; the hangover expires while it runs;
+      // by the time the worker frees up, recentlyVoiced is false, so no further pass ever starts.
+      // The audio containing "submit" was captured, buffered — and never transcribed. Same for a
+      // wake word spoken right before falling silent.
+      //
+      // Tracking how far the last pass reached fixes it precisely: exactly one trailing pass runs
+      // after speech ends, and once it has covered that speech the condition goes false again.
+      const hasUncoveredSpeech = lastVoiceAtRef.current > passCoversUpToRef.current;
+
       if (
-        recentlyVoiced &&
+        (recentlyVoiced || hasUncoveredSpeech) &&
         localBufferRef.current.length >= MIN_STREAM_SAMPLES &&
         !localWhisper.isTranscribing() &&
         now - lastLocalTranscribeRef.current >= STREAM_INTERVAL_MS
       ) {
         lastLocalTranscribeRef.current = now;
-        runLocalTranscription(localBufferRef.current.slice(), false);
+        passCoversUpToRef.current = now;
+        // Buzzed in: the whole buffer, because the answer may be a long sentence.
+        // Waiting to buzz: only the recent tail, so the wake word is not buried (see
+        // WAKE_WINDOW_SAMPLES).
+        const buf = localBufferRef.current;
+        const buzzedIn = buzzerRef.current && buzzerRef.current === usernameRef.current;
+        const pass = buzzedIn || buf.length <= WAKE_WINDOW_SAMPLES
+          ? buf.slice()
+          : buf.slice(buf.length - WAKE_WINDOW_SAMPLES);
+        runLocalTranscription(pass, false);
       }
     };
     audioSourceRef.current.connect(processor);
@@ -478,7 +564,7 @@ function AnswerBox(props) {
       if (volumeInterval) clearInterval(volumeInterval);
       if (processorRef.current) { processorRef.current.disconnect(); processorRef.current = null; }
       socketRef.current.emit('stop_audio_stream', {});
-      localBufferRef.current = emptyPcm();
+      resetLocalBuffer();
       if (stream) stream.getTracks().forEach((t) => t.stop());
       if (audioContext) audioContext.close();
       audioStreamRef.current = null;

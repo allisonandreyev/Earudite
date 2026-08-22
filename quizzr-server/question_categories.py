@@ -1,7 +1,7 @@
 """
-Maps the quizbowl dataset's own `category`/`subcategory` fields (already present on every
-UnrecordedQuestions document) onto a smaller, fixed set of user-facing buckets, and its
-`difficulty` field onto a two-tier easy/hard label.
+Maps the AUDITA dataset's own `category` field (present on every question document written by
+maintenance/import_audita.py) onto a fixed set of user-facing buckets, and its `difficulty` field
+onto a two-tier easy/hard label.
 
 Nothing here is written back to the database — these are pure functions computed at request
 time, so editing the taxonomy below is the entire "add/edit a category" workflow. No migration,
@@ -20,34 +20,28 @@ from typing import Dict, List, Optional, Tuple
 # To add/edit a bucket: just add/edit an entry here. To split a bucket later (e.g. carve
 # "Sports" out of "Sports/Pop Culture"), add a new bucket and narrow this one's rule(s).
 CATEGORY_BUCKETS: Dict[str, List[Tuple[str, Optional[str]]]] = {
-    "Literature": [("Literature", None)],
-    "History": [("History", None)],
-    "Science": [("Science", None)],
-    "Fine Arts/Music": [("Fine Arts", None)],
-    "Sports/Pop Culture": [("Trash", None)],
-    "Geography": [
-        ("Geography", None),
-        ("Social Science", "Geography"),
-    ],
-    "Religion/Mythology/Philosophy": [
-        ("Religion", None),
-        ("Philosophy", None),
-        ("Mythology", None),
-        ("Social Science", "Religion/Mythology"),
-        ("Social Science", "Philosophy"),
-    ],
+    # AUDITA's six raw category values, written by maintenance/import_audita.py. The rule keys are
+    # the lowercase strings stored in each document's `category` field; the bucket names are what
+    # the client shows and passes back as the `category` query param.
+    "Music ID": [("name", None)],
+    "Musical Elements": [("element", None)],
+    "Sports/Pop Culture": [("pop", None)],
+    "Character/Person": [("person", None)],
+    "Geography": [("geo", None)],
+    "Sound/Environment": [("sound", None)],
     # No explicit rule set for Miscellaneous — it's the fallback in bucket_for() /
-    # category_to_mongo_filter() for anything not matched above (e.g. Social Science docs
-    # with subcategory Economics/Anthropology/Psychology, and the rare doc missing category
-    # entirely).
+    # category_to_mongo_filter() for anything not matched above.
 }
 
 MISC_BUCKET = "Miscellaneous"
 ALL_BUCKETS = list(CATEGORY_BUCKETS.keys()) + [MISC_BUCKET]
 
+# AUDITA has no difficulty field of its own; the importer derives Easy/Medium/Hard from the clip
+# path where it encodes one ("01_Medium.mp3") and defaults to Medium otherwise.
 DIFFICULTY_TIERS: Dict[str, str] = {
-    "College": "easy",
-    "Open": "hard",
+    "Easy": "easy",
+    "Medium": "easy",
+    "Hard": "hard",
 }
 
 
