@@ -58,14 +58,27 @@
 }
 
 .lobby-gamesettings-slider-num {
-    margin-right: 1rem;
+    margin-right: 0.75rem;
+    /* The value is a live readout that changes as you drag, so reserve room for its widest form
+       ("20") — otherwise the track shifts sideways under the cursor as the number gets wider. */
+    min-width: 1.5rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
 }
 
 .lobby-gamesettings-slider-wrapper {
-    width: 5rem;
+    /* Was 5rem (80px). "Time between questions" spans 0-30, which put its steps 2.6px apart: you
+       could not reliably land on a value even when the drag was working, and one stray pixel of
+       mouse movement moved the setting. At 10rem a step is ~5px, and the readout beside it makes
+       the exact value legible without having to hit a pixel. */
+    width: 10rem;
+    max-width: 45%;
     height: 100%;
     display: flex;
     align-items: center;
+    /* The thumb is centred on the track end at min/max; without this it is clipped by the row. */
+    padding: 0 0.4rem;
+    box-sizing: border-box;
 }
 
 .lobby-gamesettings-buttons-wrapper {

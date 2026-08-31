@@ -24,6 +24,12 @@ def get_minutes_seconds(seconds):
     return "%02dm%02ds" % (minutes, seconds)
 
 
+# How long an answer being checked against the backend may hold off the buzz timeout.
+# Generous versus a normal /answer round-trip, but bounded: a slow or hung backend must not be
+# able to freeze a question forever.
+ANSWER_GRACE_SECONDS = 10
+
+
 class Game:
     def __init__(self, lobby, socketio):
         # TODO Set settings according to game type
@@ -125,6 +131,9 @@ class Game:
             # client can always reveal it. Empty while a question is still in progress.
             self.current_answer_text = ""
             self.last_answer_meta = None  # {qid, correct, answer, username} of the most recent answer() call
+            # Deadline while an answer is being checked against the backend; None otherwise.
+            # See _check_answer() for why the buzz timeout has to respect it.
+            self.answer_in_flight_until = None
             self.points = {}
             if self.teams == 0:
                 for player in self.players:
@@ -201,8 +210,16 @@ class Game:
                 self.active_question = [True, time.time()]
 
         if self.active_buzz[0]:  # in a buzz
+            # An answer already being checked wins the race against its own deadline. The player
+            # sent it while the buzz was live; a backend round-trip they can neither see nor
+            # control must not turn that into a timeout. _check_answer() bounds how long this
+            # can hold off the timeout.
+            answering = (
+                self.answer_in_flight_until is not None
+                and time.time() < self.answer_in_flight_until
+            )
             # if buzz time is over, keep going through question
-            if self.get_buzz_time() < 0:
+            if self.get_buzz_time() < 0 and not answering:
                 if self.teams == 0:
                     self.points[self.active_buzz[3]] -= 5
                 else:
@@ -319,6 +336,30 @@ class Game:
             print("Buzzed at: " + str(self.active_buzz[2]))
             return 2
 
+    def _check_answer(self, answer, qid):
+        """
+        Ask the backend whether `answer` is correct.
+
+        The claim around the request is the whole point of this helper. requests.get() is
+        monkey-patched by eventlet, so it YIELDS, and emit_game_state() runs every 0.1s on the
+        same hub. A buzz that crossed its deadline during the request was therefore timed out by
+        that loop: the player was docked 5 points and told "buzz timed out", and the answer they
+        had actually sent in time was then thrown away by the `active_buzz` recheck that follows
+        each call site. That is the "I said Submit and it says the buzz timed out" report — the
+        answer was sent, it just lost a race it should never have been in.
+        """
+        self.answer_in_flight_until = time.time() + ANSWER_GRACE_SECONDS
+        try:
+            return json.loads(
+                requests.get(
+                    os.environ.get("BACKEND_URL") + "/answer",
+                    params={"a": answer, "qid": qid},
+                    headers={"Authorization": self.auth_token},
+                ).text
+            )["correct"]
+        finally:
+            self.answer_in_flight_until = None
+
     # check answer while buzzed
     def answer(self, username, answer):
         # if game is over, return 0
@@ -326,16 +367,9 @@ class Game:
             return False
         else:
             buzz_start = self.active_buzz[1]  # save before yielding to eventlet
-            correct = json.loads(
-                requests.get(
-                    os.environ.get("BACKEND_URL") + "/answer",
-                    params={
-                        "a": answer,
-                        "qid": self.answering_ids[self.round - 1][self.question - 1],
-                    },
-                    headers={"Authorization": self.auth_token},
-                ).text
-            )["correct"]
+            correct = self._check_answer(
+                answer, self.answering_ids[self.round - 1][self.question - 1]
+            )
             # buzz may have timed out during the HTTP request (gamestate clears active_buzz)
             if not self.active_buzz[0]:
                 return False
@@ -407,13 +441,7 @@ class Game:
         else:
             qid = self.answering_ids[self.round - 1][self.question - 1]
             buzz_start = self.active_buzz[1]  # save before yielding to eventlet
-            correct = json.loads(
-                requests.get(
-                    os.environ.get("BACKEND_URL") + "/answer",
-                    params={"a": transcription, "qid": qid},
-                    headers={"Authorization": self.auth_token},
-                ).text
-            )["correct"]
+            correct = self._check_answer(transcription, qid)
             # buzz may have timed out during the HTTP request (gamestate clears active_buzz)
             if not self.active_buzz[0]:
                 print("classifier_answer buzz expired during HTTP request")

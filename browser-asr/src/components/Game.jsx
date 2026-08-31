@@ -410,7 +410,15 @@ function Game() {
   const gameSettings = useRecoilValue(GAMESETTINGS);
   // console.log(gameSettings);
   const [totalTime, setTotalTime] = useState(40);
-  const [totalTimeBeenSet, setTotalTimeBeenSet] = useState(false);
+  // A REF, not state. gameStateListener is registered once (see the socket effect's deps), so it
+  // closes over whatever this was on the first render forever. As state, `totalTimeBeenSet` was
+  // therefore permanently false inside the listener, so setTotalTime(data[3]) ran on EVERY
+  // gamestate tick — ~10 times a second — and `totalTime` tracked the time REMAINING instead of
+  // the question's total. That made the question progress bar's own denominator shrink with the
+  // numerator, so its blue segment sat near 100% and never visibly drained. The gap bar was
+  // unaffected because it divides by gameSettings.gap_time, which is stable — which is exactly
+  // why one timer worked and the other did not.
+  const totalTimeSetRef = useRef(false);
   const [showConffeti, setShowConfetti] = useState(false);
 
   const { width, height } = useWindowSize();
@@ -461,9 +469,9 @@ function Game() {
       if (data[0] === false) {
         setGameScreen("postgame");
       }
-      if (!totalTimeBeenSet) {
+      if (!totalTimeSetRef.current) {
+        totalTimeSetRef.current = true;
         setTotalTime(data[3]);
-        setTotalTimeBeenSet(true);
       }
       setState({
         inGame: data[0],
@@ -511,7 +519,7 @@ function Game() {
       setLastSubmittedAnswer("");
       setLastAnswerCorrect(null);
       setLastBuzzTimedOut(false);
-      setTotalTimeBeenSet(false);
+      totalTimeSetRef.current = false;
     };
 
     const hlsPlayListener = (data) => {
@@ -681,49 +689,34 @@ function Game() {
                         {state.questionTime}s
                       </div>
                       <div style={{ width: "21rem" }}>
-                        <StackedProgressBar
-                          barData={[
-                            {
-                              width:
-                                100 -
-                                Math.round(
-                                  ((totalTime - gameSettings.post_buzz_time) /
-                                    totalTime) *
-                                    100
-                                ),
-                              color: ProgressBarVariant.red,
-                            },
-                            {
-                              width: Math.round(
-                                ((totalTime - gameSettings.post_buzz_time) /
-                                  totalTime) *
-                                  100
-                              ),
-                              color: ProgressBarVariant.blue,
-                            },
-                          ]}
-                          progressData={[
-                            Math.round(
-                              (Math.min(
-                                state.questionTime,
-                                gameSettings.post_buzz_time
-                              ) /
-                                gameSettings.post_buzz_time) *
-                                100
-                            ),
-                            Math.max(
-                              0,
-                              Math.round(
-                                ((state.questionTime -
-                                  gameSettings.post_buzz_time) /
-                                  (totalTime - gameSettings.post_buzz_time)) *
-                                  100
-                              )
-                            ),
-                          ]}
-                          striped={true}
-                          animated={true}
-                        ></StackedProgressBar>
+                        {(() => {
+                          // questionTime arrives as a string (data[3].toFixed(1)), so coerce
+                          // before any arithmetic that isn't already doing it implicitly.
+                          const remaining = Number(state.questionTime);
+                          const postBuzz = gameSettings.post_buzz_time;
+                          // Both denominators can legitimately reach zero — post_buzz_time is a
+                          // lobby slider that goes down to 0, and totalTime equals it on a very
+                          // short question. Dividing there produced Infinity/NaN and the bar
+                          // rendered blank, so clamp to 1 and let the segment simply sit empty.
+                          const readSpan = Math.max(1, totalTime - postBuzz);
+                          const buzzSpan = Math.max(1, postBuzz);
+                          const readPct = Math.round((readSpan / Math.max(1, totalTime)) * 100);
+                          const pct = (v) => Math.max(0, Math.min(100, Math.round(v)));
+                          return (
+                            <StackedProgressBar
+                              barData={[
+                                { width: 100 - readPct, color: ProgressBarVariant.red },
+                                { width: readPct, color: ProgressBarVariant.blue },
+                              ]}
+                              progressData={[
+                                pct((Math.min(remaining, postBuzz) / buzzSpan) * 100),
+                                pct(((remaining - postBuzz) / readSpan) * 100),
+                              ]}
+                              striped={true}
+                              animated={true}
+                            ></StackedProgressBar>
+                          );
+                        })()}
                       </div>
                     </div>
                   )}

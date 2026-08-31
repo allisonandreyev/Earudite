@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRecoilState } from "recoil";
-import SpeechRecognition, { useSpeechRecognition } from "react-speech-recognition";
+import { useSpeechRecognition } from "react-speech-recognition";
 import { SCREEN } from "../store";
 import {
   NAV_INTENTS, NAV_BARE_INTENTS, META_INTENTS, CONFIRM_YES, CONFIRM_NO, ORDINAL_WORDS,
@@ -8,6 +8,7 @@ import {
   navIntentForGroup, menuChoiceIntent,
 } from "./intents";
 import { getRegisteredIntents } from "./registry";
+import { claimMic, releaseMic } from "./micOwner";
 import {
   getScreenControls, getGroupControls, findNavItem, showChoiceBadges, clearChoiceBadges,
 } from "./domControls";
@@ -86,14 +87,18 @@ function VoiceNav() {
   const allowed = isNavAllowed(screen);
   const active = enabled && allowed && browserSupportsSpeechRecognition;
 
+  // Registers interest rather than driving the recognizer directly — see micOwner.js. Calling
+  // abortListening() here used to stop the shared singleton for every other consumer, and since
+  // this component is mounted at the app root and stays mounted, the `else` branch fired on exactly
+  // the screen where the GAME needs the microphone. That is what stopped the in-game buzz working.
   useEffect(() => {
     if (active) {
       resetTranscript();
-      SpeechRecognition.startListening({ continuous: true });
+      claimMic('voicenav');
     } else {
-      SpeechRecognition.abortListening();
+      releaseMic('voicenav');
     }
-    return () => { SpeechRecognition.abortListening(); };
+    return () => { releaseMic('voicenav'); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 

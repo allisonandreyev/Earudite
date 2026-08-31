@@ -5,6 +5,8 @@ import { PROFILE, SOCKET } from "../store";
 import { useAlert } from "react-alert";
 import { ProgressBar } from "react-bootstrap";
 import * as localWhisper from "../asr/localWhisper";
+import { useSpeechRecognition } from "react-speech-recognition";
+import { claimMic, releaseMic } from "../voice/micOwner";
 import LegacyVoiceAnswering from "./LegacyVoiceAnswering.jsx";
 import "../pkg/StackedProgressBar.css";
 import "../styles/AnswerBox.css";
@@ -135,9 +137,29 @@ const BUZZ_TOKENS = new Set([
 const BUZZ_SCAN_WORDS = 8;
 const BUZZ_COOLDOWN_MS = 2000;
 
+// Wake-word tokens for the Web Speech recognizer (see the wake-word effect below).
+//
+// Much tighter than BUZZ_TOKENS. That list is an accept-list of everything whisper-tiny.en
+// MANGLES a shouted "buzz" into, and it has to be permissive because whisper is bad at short
+// isolated words. Web Speech is not: it returns "buzz" as "buzz". Reusing the loose list here
+// would only invite false buzzes on question audio leaking through the speakers, since these are
+// ordinary English words.
+const WEB_SPEECH_BUZZ_TOKENS = new Set([
+  'buzz', 'buzzed', 'buzzer', 'buzzes', 'buzzing', 'buss',
+]);
+// Only the last couple of words count, so a wake word has to be recent rather than anywhere in a
+// continuously growing transcript.
+const WEB_SPEECH_TAIL_WORDS = 3;
+
 // Set window.EARUDITE_VOICE_DEBUG = true in the console to trace what whisper heard and why a
 // keyword did or did not fire. Off by default so a normal game logs nothing.
-const VOICE_DEBUG = typeof window !== 'undefined' && !!window.EARUDITE_VOICE_DEBUG;
+//
+// Read live, not captured at module load. As a `const` evaluated when the bundle first ran, the
+// flag could only ever be false — the console does not exist to type into until long after that —
+// so the one tool for diagnosing voice problems could not actually be switched on.
+function voiceDebug() {
+  return typeof window !== 'undefined' && !!window.EARUDITE_VOICE_DEBUG;
+}
 
 // "submit" keyword matching — same method as BUZZ_TOKENS above (accept-list built from measured
 // whisper-tiny.en output), but with two deliberate differences.
@@ -220,6 +242,8 @@ function AnswerBox(props) {
   const speechModeRef = useRef(2);
 
   const socketRef = useRef(socket);
+  // Read from the audio callback, which is created once and cannot see later renders' values.
+  const webSpeechRef = useRef(false);
   const alertRef = useRef(alert);
   const usernameRef = useRef(username);
   useEffect(() => { socketRef.current = socket; }, [socket]);
@@ -251,6 +275,36 @@ function AnswerBox(props) {
   const buzzerRef = useRef(props.buzzer);
   const answerRef = useRef(props.answer);
   const actionRef = useRef({});
+
+  // WAKE WORD: Web Speech, not whisper.
+  //
+  // Measured on this machine, one whisper-tiny.en pass costs 4.1-4.9s warm and 9.8s on the first
+  // call of a page load (26.8s with a cold HTTP cache) — not the ~1.07s the constants above were
+  // written against. The page is not cross-origin isolated (server/server.js explains why COOP was
+  // reverted: it broke Google sign-in), so ORT runs single-threaded and that is the real cost.
+  //
+  // At 4.5s a pass, whisper cannot do a wake word at all. Passes are serialised by
+  // isTranscribing(), so one starts roughly every 4.5s and looks at the last 2.5s of audio —
+  // leaving ~2s of every 4.5s that NO pass ever examines. A "buzz" landing in one of those gaps is
+  // not heard late, it is never heard. Add the ~10s of dead air while the model compiles at the
+  // start of a game and "it never responds" is exactly right.
+  //
+  // Web Speech has none of that cost and is already proven on this word by the voice-nav bar. It
+  // runs its own browser-managed capture, independent of our getUserMedia stream (see the note in
+  // LegacyVoiceAnswering.jsx), so it does not fight the recorder for the microphone.
+  //
+  // Scope is deliberately narrow: it listens only while waiting to buzz, and is aborted the moment
+  // a buzz lands. Answer transcription stays entirely on local whisper, where a multi-second pass
+  // is affordable against a 15s answer window and the audio never leaves the machine.
+  const {
+    transcript: wakeTranscript,
+    resetTranscript: resetWakeTranscript,
+    browserSupportsSpeechRecognition,
+  } = useSpeechRecognition();
+
+  // The live transcript readout lives in VoiceDebug (bottom-left, app-wide) rather than here, so
+  // it survives the screen change into a game and shows who owns the recognizer as well.
+  const [asrError, setAsrError] = useState('');
   useEffect(() => { buzzerRef.current = props.buzzer; }, [props.buzzer]);
   useEffect(() => { answerRef.current = props.answer; }, [props.answer]);
 
@@ -396,7 +450,7 @@ function AnswerBox(props) {
     // permanently undetectable.
     if (buzzerRef.current && buzzerRef.current === usernameRef.current) {
       const { cleaned, hasSubmit } = processTranscription(text);
-      if (VOICE_DEBUG) console.log('[voice] answer pass', JSON.stringify(text), '| submit:', hasSubmit);
+      if (voiceDebug()) console.log('[voice] answer pass', JSON.stringify(text), '| submit:', hasSubmit);
       props.setAnswer(cleaned);
       if (hasSubmit) {
         // submit1() clears the buffer for every path now, so the spoken route just calls it.
@@ -414,12 +468,12 @@ function AnswerBox(props) {
       const now = Date.now();
       const hit = scanned.find(w => BUZZ_TOKENS.has(w));
       if (hit && now - lastBuzzDetectRef.current > BUZZ_COOLDOWN_MS) {
-        if (VOICE_DEBUG) console.log('[voice] BUZZ on', JSON.stringify(hit), 'from', JSON.stringify(text));
+        if (voiceDebug()) console.log('[voice] BUZZ on', JSON.stringify(hit), 'from', JSON.stringify(text));
         lastBuzzDetectRef.current = now;
         resetLocalBuffer();
         socketRef.current.emit('reset_audio_stream', {});
         actionRef.current.buzzin();
-      } else if (VOICE_DEBUG && text) {
+      } else if (voiceDebug() && text) {
         console.log('[voice] no buzz in', JSON.stringify(text), '| scanned:', scanned);
       }
     }
@@ -438,6 +492,91 @@ function AnswerBox(props) {
     applyLocalTranscription(text, isFinal);
   }
 
+  // ONE recognizer for the whole voice flow: the wake word AND the spoken answer.
+  //
+  // Answering used to run on local whisper, and whisper is simply too slow to do it here — a warm
+  // pass measures 4-5s on this (un-isolated, single-threaded) page, so an answer appeared seconds
+  // after it was spoken and a trailing "submit" routinely missed the buzz window entirely. Web
+  // Speech is the recognizer already proven on this app, in the voice-nav bar: it streams
+  // interim results continuously, so the answer box fills in as you speak and "submit" fires the
+  // moment you say it.
+  //
+  // Same shape as VoiceNav: start on mount, listen continuously, read the tail of the transcript,
+  // reset after acting. The only thing that changes between the two phases is what the tail is
+  // scanned for — a wake word before a buzz, a submit keyword after one.
+  //
+  // Note the raw microphone audio still streams to the backend as labelled training data exactly
+  // as before (see the 'audio_chunk' emit in startPCMStream); that path is untouched by this.
+  const voiceOn = speechMode === 2 && !!browserSupportsSpeechRecognition;
+  const buzzedInByMe = !!props.buzzer && props.buzzer === username;
+  webSpeechRef.current = voiceOn;
+
+  useEffect(() => {
+    if (voiceOn) {
+      resetWakeTranscript();
+      claimMic('answerbox');
+    } else {
+      // Released rather than merely ignored: on Chrome this audio goes to Google's servers, so
+      // once the player switches the mic off nothing here should keep it open. micOwner stops the
+      // recognizer as soon as no one is claiming it.
+      releaseMic('answerbox');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceOn]);
+
+  useEffect(() => () => { releaseMic('answerbox'); }, []);
+
+  // Clear the transcript on every buzz transition, so the wake word itself is never treated as the
+  // first word of the answer, and a previous answer never bleeds into the next buzz.
+  useEffect(() => {
+    resetWakeTranscript();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.buzzer, props.question]);
+
+  useEffect(() => {
+    if (!voiceOn || !wakeTranscript) return;
+
+    if (buzzedInByMe) {
+      // Buzzed in: the transcript IS the answer. Interim results mean this updates as you talk.
+      const { cleaned, hasSubmit } = processTranscription(wakeTranscript);
+      if (voiceDebug()) console.log('[voice] answer', JSON.stringify(wakeTranscript), '| submit:', hasSubmit);
+      props.setAnswer(cleaned);
+      if (hasSubmit) {
+        // Reset first: submit1() clears the answer box, and a transcript still holding "…submit"
+        // would immediately refill it and fire again on the next interim result.
+        resetWakeTranscript();
+        actionRef.current.submit1(cleaned);
+      }
+      return;
+    }
+
+    if (props.buzzer) return;   // someone else has it; nothing to listen for
+
+    const words = wakeTranscript.trim().toLowerCase()
+      .replace(/[^a-z\s']/g, ' ').split(/\s+/).filter(Boolean);
+    const recent = words.slice(-WEB_SPEECH_TAIL_WORDS);
+    const hit = recent.find((w) => WEB_SPEECH_BUZZ_TOKENS.has(w));
+    const now = Date.now();
+    if (hit && now - lastBuzzDetectRef.current > BUZZ_COOLDOWN_MS) {
+      if (voiceDebug()) console.log('[voice] BUZZ (web speech) on', JSON.stringify(hit));
+      lastBuzzDetectRef.current = now;
+      resetWakeTranscript();
+      // Nothing said before the buzz belongs in the answer box.
+      resetLocalBuffer();
+      socketRef.current.emit('reset_audio_stream', {});
+      actionRef.current.buzzin();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wakeTranscript, voiceOn, buzzedInByMe, props.buzzer]);
+
+  // Surface a recogniser failure rather than letting it look like the mic simply isn't hearing
+  // you. localWhisper recovers on its own now (it rebuilds the worker), so this clears itself.
+  useEffect(() => {
+    if (speechMode !== 2) { setAsrError(''); return; }
+    const t = setInterval(() => setAsrError(localWhisper.getLastError()), 1000);
+    return () => clearInterval(t);
+  }, [speechMode]);
+
   useKeyPress("Enter", submit1, [props.answer], true);
   useKeyPress(" ", buzzin, [], document.activeElement !== textAnswer.current);
 
@@ -454,8 +593,12 @@ function AnswerBox(props) {
       const merged = new Float32Array(localBufferRef.current.length + pcm.length);
       merged.set(localBufferRef.current);
       merged.set(pcm, localBufferRef.current.length);
-      localBufferRef.current = merged.length > MAX_PARTIAL_SAMPLES
-        ? merged.slice(merged.length - MAX_PARTIAL_SAMPLES)
+      // The rolling buffer has to hold everything the next pass might need. Pre-buzz that is now
+      // "whatever accumulated since the last pass started" rather than a fixed 2.5s (see wakeSpan
+      // below), and post-buzz it is the whole answer, so both cases want the same 10s cap.
+      const keep = MAX_PARTIAL_SAMPLES;
+      localBufferRef.current = merged.length > keep
+        ? merged.slice(merged.length - keep)
         : merged;
 
       const now = Date.now();
@@ -491,11 +634,39 @@ function AnswerBox(props) {
       // after speech ends, and once it has covered that speech the condition goes false again.
       const hasUncoveredSpeech = lastVoiceAtRef.current > passCoversUpToRef.current;
 
+      const buzzedIn = buzzerRef.current && buzzerRef.current === usernameRef.current;
+
+      // How much audio the next pre-buzz pass must cover.
+      //
+      // A fixed 2.5s window silently assumed a pass costs about that much. Passes actually cost
+      // 4-5s here, so consecutive windows did not touch: roughly 2s of every 4.5s was never looked
+      // at by anything. Covering everything since the last pass started closes that gap, so
+      // whisper remains a complete (if slow) backstop behind the Web Speech wake word above.
+      const sinceLastPass = Math.ceil(((now - passCoversUpToRef.current) / 1000) * STREAM_SAMPLE_RATE);
+      const wakeSpan = Math.min(
+        MAX_PARTIAL_SAMPLES,
+        Math.max(WAKE_WINDOW_SAMPLES, sinceLastPass)
+      );
+
+      // Waiting to buzz, passes run back-to-back; once buzzed in they stay throttled.
+      //
+      // STREAM_INTERVAL_MS exists so a long answer is not re-transcribed far more often than it
+      // changes. Before a buzz there is no answer — the only thing being looked for is one wake
+      // word, over a 2.5s window, and every millisecond between saying "buzz" and the pass that
+      // spots it is latency the player feels directly. isTranscribing() already caps this at one
+      // pass at a time (they cannot overlap), so the extra half-second on top bought nothing and
+      // added up to 500ms to every voice buzz.
+      const minInterval = buzzedIn ? STREAM_INTERVAL_MS : 0;
+
       if (
+        // Only when Web Speech is unavailable. Where it works it handles both the wake word and
+        // the answer, and running whisper as well would burn a core for the whole question on
+        // passes nothing reads — and, post-buzz, would fight it for the answer box.
+        !webSpeechRef.current &&
         (recentlyVoiced || hasUncoveredSpeech) &&
         localBufferRef.current.length >= MIN_STREAM_SAMPLES &&
         !localWhisper.isTranscribing() &&
-        now - lastLocalTranscribeRef.current >= STREAM_INTERVAL_MS
+        now - lastLocalTranscribeRef.current >= minInterval
       ) {
         lastLocalTranscribeRef.current = now;
         passCoversUpToRef.current = now;
@@ -503,10 +674,9 @@ function AnswerBox(props) {
         // Waiting to buzz: only the recent tail, so the wake word is not buried (see
         // WAKE_WINDOW_SAMPLES).
         const buf = localBufferRef.current;
-        const buzzedIn = buzzerRef.current && buzzerRef.current === usernameRef.current;
-        const pass = buzzedIn || buf.length <= WAKE_WINDOW_SAMPLES
+        const pass = buzzedIn || buf.length <= wakeSpan
           ? buf.slice()
-          : buf.slice(buf.length - WAKE_WINDOW_SAMPLES);
+          : buf.slice(buf.length - wakeSpan);
         runLocalTranscription(pass, false);
       }
     };
@@ -619,6 +789,11 @@ function AnswerBox(props) {
         <div class="answerbox-answering-voice-instructions">
           Say <div class="answerbox-answering-voice-instructions-highlight">"buzz"</div> or click Buzz → speak → click
           <div class="answerbox-answering-voice-instructions-btn-highlight">Submit</div>
+        </div>
+      }
+      {speechMode === 2 && asrError &&
+        <div className="answerbox-voice-heard-error">
+          Speech recognition problem: {asrError} — retrying
         </div>
       }
     </div>

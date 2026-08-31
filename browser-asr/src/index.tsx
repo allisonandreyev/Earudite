@@ -3,6 +3,7 @@ import ReactDOM from "react-dom";
 import "./styles/index.css";
 import BigWhitePanel from "./components/WhitePanel";
 import VoiceNav from "./voice/VoiceNav";
+import VoiceDebug from "./voice/VoiceDebug";
 import reportWebVitals from "./reportWebVitals";
 import { RecoilRoot } from "recoil";
 import { transitions, positions, Provider as AlertProvider } from 'react-alert';
@@ -26,6 +27,9 @@ ReactDOM.render(
               and its re-renders must not cascade into Game/AnswerBox, whose audio callback runs on
               the main thread. See the header comment in VoiceNav.jsx. */}
           <VoiceNav/>
+          {/* Same reasoning as VoiceNav for the placement. Shows whether the shared
+              recognizer is running and who claimed it; click x to hide it for good. */}
+          <VoiceDebug/>
         </AlertProvider>
     </RecoilRoot>
   </React.StrictMode>,

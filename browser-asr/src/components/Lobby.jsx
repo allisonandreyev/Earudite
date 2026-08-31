@@ -1,5 +1,5 @@
 import "../styles/Lobby.css";
-import { useState, useEffect, useReducer } from "react";
+import { useState, useEffect, useReducer, useRef } from "react";
 import PersonIcon from '@material-ui/icons/Person';
 import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
 import { LOBBY_CODE, SOCKET, PLAY_SCREEN, SCREEN, AUTHTOKEN, PROFILE, GAMESETTINGS } from "../store";
@@ -105,6 +105,72 @@ function clone(obj) {
     throw new Error("Unable to copy obj! Its type isn't supported.");
 }
 
+
+// A lobby settings slider.
+//
+// These used to be driven ENTIRELY by a value that arrives over the network: onChange emitted to
+// the socket server, the server broadcast `lobbystate` to the room, and only that echo moved the
+// thumb. MUI v4 makes that fatal rather than merely slow — its useControlled turns the Slider's
+// internal setValueState into a no-op the moment a `value` prop is supplied, so the thumb had no
+// local position of its own at all. Every pixel of a drag fired a socket emit and the thumb sat
+// still until a round-trip landed, which is why dragging felt like it was ignoring you, and why a
+// slow or dropped echo left the slider resting on a value nobody chose.
+//
+// So the thumb is driven locally and the network is touched once, on release. A value arriving
+// from the server is adopted only when it cannot contradict what the user is doing right now.
+function SettingSlider(props) {
+    const { value, onCommit, ...sliderProps } = props;
+    const [local, setLocal] = useState(value);
+    const draggingRef = useRef(false);
+    // The value we last sent and have not seen echoed back yet. Until that echo arrives the
+    // server-derived `value` still holds the OLD number, so adopting it would snap the thumb back
+    // for the length of one round-trip — exactly the flicker this is here to prevent.
+    const pendingRef = useRef(null);
+    const pendingTimerRef = useRef(null);
+
+    useEffect(() => {
+        if (draggingRef.current) return;          // never fight a drag in progress
+        if (pendingRef.current !== null) {
+            if (value !== pendingRef.current) return;   // somebody else's update, or a stale echo
+            clearTimeout(pendingTimerRef.current);
+            pendingRef.current = null;
+        }
+        setLocal(value);
+    }, [value]);
+
+    useEffect(() => () => clearTimeout(pendingTimerRef.current), []);
+
+    function commit(v) {
+        draggingRef.current = false;
+        clearTimeout(pendingTimerRef.current);
+        pendingRef.current = v;
+        // If the echo never comes (a dropped update, a reconnect mid-drag), stop waiting for it —
+        // otherwise the slider would sit on a value the server never accepted, with no way back.
+        pendingTimerRef.current = setTimeout(() => { pendingRef.current = null; }, 4000);
+        onCommit(v);
+    }
+
+    return (
+        <div className="lobby-gamesettings-hor-flex">
+            {/* The number is what people actually read; the 80px track could not show the
+                difference between 17 and 18 seconds. */}
+            <div className="lobby-gamesettings-slider-num">{local}</div>
+            <div className="lobby-gamesettings-slider-wrapper">
+                <Slider
+                    {...sliderProps}
+                    value={local}
+                    valueLabelDisplay="auto"
+                    // Local only. The thumb has to track the cursor without waiting for anyone.
+                    onChange={(event, v) => { draggingRef.current = true; setLocal(v); }}
+                    // One emit per interaction instead of one per mousemove. Fires for a drag
+                    // release, a click on the track, and an arrow-key press alike.
+                    onChangeCommitted={(event, v) => commit(v)}
+                />
+            </div>
+        </div>
+    );
+}
+
 // lobby hook
 function Lobby() {
     const profile = useRecoilValue(PROFILE);
@@ -178,7 +244,12 @@ function Lobby() {
             socket.off("startgamefailed", startGameFailedListener);
             socket.off("lobbyloading", lobbyLoadingListener);
         }
-    });
+        // Registered once per socket. This effect previously had NO dependency array, so all five
+        // handlers were torn down and re-attached on every render — and a slider drag re-renders
+        // this component on every mousemove, so a single drag churned through hundreds of
+        // register/unregister cycles. Same bug, same fix, as the Game.jsx socket effect.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [socket]);
     
 
     function leave() {
@@ -287,60 +358,33 @@ function Lobby() {
                         </div>
                         <div class="lobby-gamesettings-setting-wrapper">
                             <div>Questions per round</div>
-                            <div class="lobby-gamesettings-hor-flex">
-                                <div class="lobby-gamesettings-slider-wrapper">
-                                    <Slider
-                                        defaultValue={gameSettings['questions_num']}
-                                        valueLabelDisplay="auto"
-                                        step={1}
-                                        min={1}
-                                        max={20}
-                                        value={gameSettings['questions_num']}
-                                        onChange={(event, value) => {
-                                            updateSettings({'questions_num': value});
-                                        }}
-                                        classes={"lobby-gamesettings-slider-wrapper"}
-                                    />
-                                </div>
-                            </div>
+                            <SettingSlider
+                                step={1}
+                                min={1}
+                                max={20}
+                                value={gameSettings['questions_num']}
+                                onCommit={(value) => updateSettings({'questions_num': value})}
+                            />
                         </div>
                         <div class="lobby-gamesettings-setting-wrapper">
                             <div>Time between questions (s)</div>
-                            <div class="lobby-gamesettings-hor-flex">
-                                <div class="lobby-gamesettings-slider-wrapper">
-                                    <Slider
-                                        defaultValue={gameSettings['gap_time']}
-                                        valueLabelDisplay="auto"
-                                        step={1}
-                                        min={0}
-                                        max={30}
-                                        value={gameSettings['gap_time']}
-                                        onChange={(event, value) => {
-                                            updateSettings({'gap_time': value});
-                                        }}
-                                        classes={"lobby-gamesettings-slider-wrapper"}
-                                    />
-                                </div>
-                            </div>
+                            <SettingSlider
+                                step={1}
+                                min={0}
+                                max={30}
+                                value={gameSettings['gap_time']}
+                                onCommit={(value) => updateSettings({'gap_time': value})}
+                            />
                         </div>
                         <div class="lobby-gamesettings-setting-wrapper">
                             <div>Buzz time after questions (s)</div>
-                            <div class="lobby-gamesettings-hor-flex">
-                                <div class="lobby-gamesettings-slider-wrapper">
-                                    <Slider
-                                        defaultValue={gameSettings['post_buzz_time']}
-                                        valueLabelDisplay="auto"
-                                        step={1}
-                                        min={0}
-                                        max={10}
-                                        value={gameSettings['post_buzz_time']}
-                                        onChange={(event, value) => {
-                                            updateSettings({'post_buzz_time': value});
-                                        }}
-                                        classes={"lobby-gamesettings-slider-wrapper"}
-                                    />
-                                </div>
-                            </div>
+                            <SettingSlider
+                                step={1}
+                                min={0}
+                                max={10}
+                                value={gameSettings['post_buzz_time']}
+                                onCommit={(value) => updateSettings({'post_buzz_time': value})}
+                            />
                         </div>
                     </div>
                     <div class="lobby-gamesettings-buttons-wrapper">

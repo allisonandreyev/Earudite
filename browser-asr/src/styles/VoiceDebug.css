@@ -1,0 +1,63 @@
+/* Bottom-corner readout of the shared speech recognizer. Deliberately small, monospace and
+   low-contrast: it sits over the game for the whole session, so it has to be legible on demand
+   without competing with anything. pointer-events only on the close control, so it can never
+   swallow a click meant for the page underneath. */
+.voicedebug-wrapper {
+    position: fixed;
+    left: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 2147483001;
+    pointer-events: none;
+    max-width: 22rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.5rem;
+    background-color: rgba(20, 24, 33, 0.82);
+    color: #E8EDF6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    line-height: 1.35;
+}
+
+.voicedebug-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.voicedebug-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background-color: #C0392B;
+    flex-shrink: 0;
+}
+
+.voicedebug-dot-on {
+    background-color: #4CD964;
+}
+
+.voicedebug-label {
+    font-weight: 600;
+}
+
+.voicedebug-owner {
+    opacity: 0.65;
+}
+
+.voicedebug-close {
+    margin-left: auto;
+    padding: 0 0.25rem;
+    cursor: pointer;
+    opacity: 0.6;
+    pointer-events: auto;
+}
+
+.voicedebug-close:hover {
+    opacity: 1;
+}
+
+.voicedebug-heard {
+    margin-top: 0.15rem;
+    color: #9FE8C0;
+    word-break: break-word;
+}

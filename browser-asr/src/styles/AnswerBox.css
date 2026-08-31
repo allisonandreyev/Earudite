@@ -132,3 +132,16 @@
     width: 80%;
     margin-top: 0.5rem;
 }
+/* Only shown when the recogniser is actually broken — the live transcript readout that used to sit
+   here moved to VoiceDebug in the bottom-left corner. Fixed-height so appearing does not shift the
+   buttons above it. */
+.answerbox-voice-heard-error {
+    margin-top: 0.35rem;
+    min-height: 1.1rem;
+    font-size: 0.75rem;
+    color: #C0392B;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}

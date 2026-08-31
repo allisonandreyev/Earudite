@@ -42,6 +42,7 @@ from ratelimiter import RateLimiter
 from mail_lib import Mailer
 import question_categories
 import rec_processing
+import soundex
 import sv_util
 from sv_api import QuizzrAPISpec
 from tpm import QuizzrTPM
@@ -101,6 +102,9 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         "DIFFICULTY_DIST": [0.6, 0.3, 0.1],
         "VERSION": "0.2.0",
         "MIN_ANSWER_SIMILARITY": 85,
+        # Fallback phonetic (Soundex) comparison for answers that sound right but are
+        # spelled/transcribed wrong. Set MIN_ANSWER_PHONETIC_SIMILARITY to None to disable.
+        "MIN_ANSWER_PHONETIC_SIMILARITY": 90,
         "PROC_CONFIG": {
             "checkUnk": True,
             "unkToken": "<unk>",
@@ -766,9 +770,31 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
                 log_msg=True
             )
 
+        # A guess made only of stopwords is a subset of almost every answer, so
+        # token_set_ratio scores it 100 ("the" vs "the Battle of Hastings"). Reject it
+        # outright, unless the answer itself is nothing but stopwords (e.g. "It").
+        if soundex.tokenize(correct_answer) and not soundex.tokenize(user_answer):
+            _debug_variable("answer_rejected", "stopwords_only")
+            return {"correct": False}
+
         answer_similarity = fuzz.token_set_ratio(user_answer, correct_answer)
         _debug_variable("answer_similarity", answer_similarity)
-        return {"correct": answer_similarity >= app.config["MIN_ANSWER_SIMILARITY"]}
+        correct = answer_similarity >= app.config["MIN_ANSWER_SIMILARITY"]
+
+        # Fall back to Soundex so a phonetically correct answer that is misspelled or
+        # mis-transcribed ("neechee" for "Nietzsche") still scores.
+        min_phonetic = app.config.get("MIN_ANSWER_PHONETIC_SIMILARITY")
+        if not correct and min_phonetic is not None:
+            user_code = soundex.encode_phrase(user_answer)
+            correct_code = soundex.encode_phrase(correct_answer)
+            _debug_variable("user_answer_soundex", user_code)
+            _debug_variable("correct_answer_soundex", correct_code)
+            if user_code and correct_code:
+                phonetic_similarity = fuzz.token_set_ratio(user_code, correct_code)
+                _debug_variable("phonetic_similarity", phonetic_similarity)
+                correct = phonetic_similarity >= min_phonetic
+
+        return {"correct": correct}
 
     @app.route("/answer_full/<int:qid>", methods=["GET"])
     def get_answer(qid):
