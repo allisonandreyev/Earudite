@@ -13,6 +13,19 @@ import SpeechRecognition from "react-speech-recognition";
 // So consumers no longer start and stop the recognizer directly. They register interest, and this
 // module runs it while at least one of them wants it. A screen where one consumer hands over to
 // another (leaving the lobby for a game) never stops listening at all.
+// The app only works in English, whatever language the browser is set to. Left unset, Web Speech
+// falls back to the page/browser locale, so a user with e.g. a Spanish browser got Spanish
+// recognition and nothing matched. Pin it once here: react-speech-recognition keeps
+// recognition.lang unless a caller passes a different `language`, and none do — including
+// asr-answering's own startListening({continuous: true}) in speech mode 1.
+export const RECOGNITION_LANGUAGE = "en-US";
+try {
+  const recognition = SpeechRecognition.getRecognition();
+  if (recognition) recognition.lang = RECOGNITION_LANGUAGE;
+} catch (e) {
+  // no Web Speech support in this browser — nothing to configure
+}
+
 const claims = new Set();
 const watchers = new Set();
 let listening = false;
@@ -23,7 +36,7 @@ function apply() {
   if (want === listening) { notify(); return; }
   listening = want;
   try {
-    if (want) SpeechRecognition.startListening({ continuous: true });
+    if (want) SpeechRecognition.startListening({ continuous: true, language: RECOGNITION_LANGUAGE });
     else SpeechRecognition.abortListening();
   } catch (e) {
     // A recognizer that refuses to start is reported through the status, not thrown at the caller.

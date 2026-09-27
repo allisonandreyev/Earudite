@@ -1,7 +1,8 @@
 import "../styles/Play.css";
 import { useState } from "react";
 import { useRecoilValue, useSetRecoilState } from "recoil";
-import { SOCKET, LOBBY_CODE, PLAY_SCREEN, GAMESETTINGS, AUTHTOKEN } from "../store";
+import { SOCKET, LOBBY_CODE, PLAY_SCREEN, GAMESETTINGS, AUTHTOKEN, SCREEN } from "../store";
+import Leaderboards from "./Leaderboards.jsx";
 import { useVoiceCommands } from "../voice/registry";
 import { useEffect } from "react";
 import { useAlert } from 'react-alert'
@@ -126,22 +127,6 @@ const gameSettingsList = [
     }),
 ];
 
-
-// name = display name, gamemode = gamemode state, layer = layer of button, self = which button on the layer is it
-function GamemodeBtn(props) {
-    // function setGamemodeHandler() {
-    //     props.setGamemode(props.self);
-    // }
-    
-    return (
-        <div className={"play-gamemode-btn " + (props.gamemode === props.self ? "play-gamemode-btn-selected" : "")} onClick={ () => {
-            document.location.hash = props.self;
-            props.setGamemode(props.self);
-        }}>
-            {props.name}
-        </div>
-    );
-}
 
 // card for a gamemode that is coming soon
 function GamemodeComingSoonCard(props) {
@@ -340,19 +325,40 @@ function JoinCustomLobbyCard(props) {
 
 
 
+// Top-level tab on the Play page. Leaderboards lives here rather than in the sidenav, so the tab
+// is its own screen (5) with its own hash — "go to leaderboards" and a reload both land on it.
+function PlayTab(props) {
+    const setScreen = useSetRecoilState(SCREEN);
+    return (
+        <div className={"play-gamemode-btn " + (props.tab === props.self ? "play-gamemode-btn-selected" : "")} onClick={() => {
+            setScreen(props.screen);
+            document.location.hash = props.hash;
+        }}>
+            {props.name}
+        </div>
+    );
+}
+
 // play page hook
 function Play(props) {
-    const [gamemode, setGamemode] = useState("custom");
+    // Only Custom is live; the casual/ranked/solo branches below are kept for when those return.
+    const gamemode = "custom";
+    const tab = props.tab || "games";
 
     return (
         <div class="play-content-wrapper">
             <div class="play-gamemode-wrapper">
-                <GamemodeBtn name={"Custom"} self={"custom"} gamemode={gamemode} setGamemode={setGamemode}/>
-                {/* <GamemodeBtn name={"Casual"} self={"casual"} gamemode={gamemode} setGamemode={setGamemode}/>
-                <GamemodeBtn name={"Ranked"} self={"ranked"} gamemode={gamemode} setGamemode={setGamemode}/>
-                <GamemodeBtn name={"Solo"} self={"solo"} gamemode={gamemode} setGamemode={setGamemode}/> */}
+                <PlayTab name={"Games"} self={"games"} tab={tab} screen={3} hash={"play"}/>
+                <PlayTab name={"Leaderboards"} self={"leaderboards"} tab={tab} screen={5} hash={"leaderboards"}/>
             </div>
 
+            { tab === "leaderboards" &&
+                <div class="play-leaderboards-wrapper">
+                    <Leaderboards/>
+                </div>
+            }
+
+            { tab === "games" &&
             <div class="play-gamemodecards-wrapper">
                 { gamemode === "casual" && // casual
                     <>
@@ -380,6 +386,7 @@ function Play(props) {
                 }
 
             </div>
+            }
         </div>
     );
 }

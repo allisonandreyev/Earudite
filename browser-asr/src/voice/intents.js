@@ -5,28 +5,26 @@
 // per-screen registration all read from one source.
 //
 // SCREEN numbers come from the router in WhitePanel.jsx; navigation must set BOTH the atom and
-// document.location.hash, because the sidenav does (WhitePanel.jsx:175-181) and the hash is what
+// document.location.hash, because the sidenav does (WhitePanel.jsx) and the hash is what
 // authCallback replays on reload.
 
 export const SCREENS = {
   PROFILE: 1,
-  DASHBOARD: 2,
+  HOME: 2,
   PLAY: 3,
   RECORD: 4,
-  LEADERBOARDS: 5,
+  LEADERBOARDS: 5,   // rendered as a tab of the Play page
   GAME: 6,
   TUTORIAL: 8,
-  AI_LEADERBOARD: 9,
-  MODEL_PREFERENCES: 10,
+  SETTINGS: 10,
 };
 
 // Screens where voice navigation is allowed to listen at all. The in-game screen is deliberately
 // absent: during a game the mic belongs to the buzz wake word and answer transcription, and a
 // second recognizer there both competes for audio and re-renders the game tree.
 export const NAV_ALLOWED_SCREENS = [
-  SCREENS.PROFILE, SCREENS.DASHBOARD, SCREENS.PLAY, SCREENS.RECORD,
-  SCREENS.LEADERBOARDS, SCREENS.TUTORIAL, SCREENS.AI_LEADERBOARD,
-  SCREENS.MODEL_PREFERENCES,
+  SCREENS.PROFILE, SCREENS.HOME, SCREENS.PLAY, SCREENS.RECORD,
+  SCREENS.LEADERBOARDS, SCREENS.TUTORIAL, SCREENS.SETTINGS,
 ];
 
 export function isNavAllowed(screen) {
@@ -56,17 +54,18 @@ export const NAV_INTENTS = [
     hash: 'profile',
   },
   {
-    id: 'nav.dashboard',
-    label: 'Dashboard',
-    phrases: ['go to dashboard', 'open dashboard', 'dashboard menu', 'go home'],
-    bare: ['dashboard', 'home'],
-    screen: SCREENS.DASHBOARD,
-    hash: 'dashboard',
+    id: 'nav.home',
+    label: 'Home',
+    phrases: ['go home', 'go to home', 'open home', 'go to dashboard', 'open dashboard'],
+    bare: ['home', 'dashboard'],
+    screen: SCREENS.HOME,
+    hash: 'home',
   },
   {
     id: 'nav.play',
     label: 'Play',
-    phrases: ['go to play', 'open play', 'play menu', 'play a game', 'start playing'],
+    phrases: ['go to play', 'open play', 'play menu', 'play a game', 'play a question',
+      'start playing'],
     bare: ['play'],
     screen: SCREENS.PLAY,
     hash: 'play',
@@ -92,20 +91,12 @@ export const NAV_INTENTS = [
     hash: 'leaderboards',
   },
   {
-    id: 'nav.aiLeaderboard',
-    label: 'AI Models',
-    phrases: ['ai model leaderboard', 'ai leaderboard', 'ai models', 'model leaderboard'],
-    bare: [],
-    screen: SCREENS.AI_LEADERBOARD,
-    hash: 'ai-leaderboard',
-  },
-  {
-    id: 'nav.modelPreferences',
-    label: 'Model Preferences',
-    phrases: ['model preferences', 'model prefs', 'open preferences'],
-    bare: ['preferences', 'settings'],
-    screen: SCREENS.MODEL_PREFERENCES,
-    hash: 'model-preferences',
+    id: 'nav.settings',
+    label: 'Settings',
+    phrases: ['go to settings', 'open settings', 'model preferences', 'model prefs', 'open preferences'],
+    bare: ['settings', 'preferences'],
+    screen: SCREENS.SETTINGS,
+    hash: 'settings',
   },
   {
     id: 'nav.tutorial',

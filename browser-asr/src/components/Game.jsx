@@ -731,6 +731,52 @@ function Game() {
                   }
                 ></div>
 
+                {/* Shown for the whole gap after each question, directly above the buzz/answer box —
+                    that is where the player is already looking, so the reveal sits in the middle
+                    column instead of the standings sidebar. It is driven by the server's
+                    canonical answer (gamestate data[9]) rather than by whether this player happened
+                    to answer, so the reveal appears every time the countdown ends — including for
+                    players who never buzzed. "Your answer" is the only part that depends on having
+                    submitted something. */}
+                {(state.correctAnswer || lastSubmittedAnswer || lastBuzzTimedOut) && (
+                  <div className="game-submitted-answer-panel">
+                    {lastBuzzTimedOut && !lastSubmittedAnswer && (
+                      <div className="game-submitted-answer-row">
+                        <span className="game-submitted-answer-label">Your answer:</span>
+                        <span className="game-submitted-answer-text">
+                          Buzz timed out — no answer sent
+                        </span>
+                      </div>
+                    )}
+                    {lastSubmittedAnswer && (
+                      <div className="game-submitted-answer-row">
+                        <span className="game-submitted-answer-label">Your answer:</span>
+                        <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
+                        {lastAnswerCorrect === true && (
+                          <CheckIcon style={{ color: "#2e9d3a" }} />
+                        )}
+                        {lastAnswerCorrect === false && (
+                          <CloseIcon style={{ color: "#d64545" }} />
+                        )}
+                      </div>
+                    )}
+                    {(() => {
+                      // Never echo the player's own text here: answers are judged by fuzzy match, so
+                      // a "correct" answer is often only a partial of the real one.
+                      const canonical =
+                        state.correctAnswer ||
+                        ([...state.prevAnswers].reverse().find(([, correct]) => correct) || [])[0];
+                      if (!canonical) return null;
+                      return (
+                        <div className="game-submitted-answer-row">
+                          <span className="game-submitted-answer-label">Correct answer:</span>
+                          <span className="game-submitted-answer-text">{canonical}</span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
                 <div class="game-menubox">
                   <AnswerBox
                     buzz={buzz}
@@ -754,49 +800,6 @@ function Game() {
               buzzer={state.buzzer}
               buzzTime={state.buzzTime}
             />
-            {/* Shown for the whole gap after each question. The panel is driven by the server's
-                canonical answer (gamestate data[9]) rather than by whether this player happened
-                to answer, so the reveal appears every time the countdown ends — including for
-                players who never buzzed. "Your answer" is the only part that depends on having
-                submitted something. */}
-            {(state.correctAnswer || lastSubmittedAnswer || lastBuzzTimedOut) && (
-              <div className="game-team-wrapper game-team-standings game-submitted-answer-panel">
-                {lastBuzzTimedOut && !lastSubmittedAnswer && (
-                  <div className="game-submitted-answer-row">
-                    <span className="game-submitted-answer-label">Your answer:</span>
-                    <span className="game-submitted-answer-text">
-                      Buzz timed out — no answer sent
-                    </span>
-                  </div>
-                )}
-                {lastSubmittedAnswer && (
-                  <div className="game-submitted-answer-row">
-                    <span className="game-submitted-answer-label">Your answer:</span>
-                    <span className="game-submitted-answer-text">{lastSubmittedAnswer}</span>
-                    {lastAnswerCorrect === true && (
-                      <CheckIcon style={{ color: "#B0F5AB" }} />
-                    )}
-                    {lastAnswerCorrect === false && (
-                      <CloseIcon style={{ color: "#FC94A1" }} />
-                    )}
-                  </div>
-                )}
-                {(() => {
-                  // Never echo the player's own text here: answers are judged by fuzzy match, so
-                  // a "correct" answer is often only a partial of the real one.
-                  const canonical =
-                    state.correctAnswer ||
-                    ([...state.prevAnswers].reverse().find(([, correct]) => correct) || [])[0];
-                  if (!canonical) return null;
-                  return (
-                    <div className="game-submitted-answer-row">
-                      <span className="game-submitted-answer-label">Correct answer:</span>
-                      <span className="game-submitted-answer-text">{canonical}</span>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
           </div>
         </div>
       </React.Fragment>

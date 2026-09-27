@@ -11,26 +11,22 @@ import { useAlert } from 'react-alert';
 import axios from 'axios';
 
 // PAGES
-import Dashboard from './Dashboard.jsx';
+import Home from './Home.jsx';
 import Profile from './Profile.jsx';
 import Shop from './Shop.jsx';
 import Play from './Play.jsx';
-import Leaderboards from './Leaderboards.jsx';
 import CreateAccount from './CreateAccount.jsx';
-import AiModelLeaderboard from './AiModelLeaderboard.jsx';
 import ModelPreferences from './ModelPreferences.jsx';
 
 // ASSETS
 import HelpOutlineIcon from '@material-ui/icons/HelpOutline';
 // Sidenav
-import DashboardIcon from '@material-ui/icons/Dashboard';
+import HomeIcon from '@material-ui/icons/Home';
 import AccountCircleIcon from '@material-ui/icons/AccountCircle';
 import SportsEsportsIcon from '@material-ui/icons/SportsEsports';
 import ExitToAppIcon from '@material-ui/icons/ExitToApp';
-import EmojiEventsIcon from '@material-ui/icons/EmojiEvents';
 import MicIcon from '@material-ui/icons/Mic';
-import MemoryIcon from '@material-ui/icons/Memory';
-import TuneIcon from '@material-ui/icons/Tune';
+import SettingsIcon from '@material-ui/icons/Settings';
 
 // // Currency
 // import EnergyIcon from '../assets/energy.png';
@@ -95,7 +91,7 @@ function LoginBody() {
                     // Handle error
                   });
                 setScreen(-1);
-                document.location.hash = "dashboard";
+                document.location.hash = "home";
             } else {
                 return;
             }
@@ -161,17 +157,18 @@ function TutorialBtn2(props) {
     )
 }
 
-// the sidenav
-function Sidenav(props) {
+// Profile, settings and logout as a row of icons rather than full menu entries — they are not
+// where people go to play or record, so they shouldn't compete with those for attention. Shown at
+// the bottom of the sidenav, and along the bottom of Home (which has no sidenav).
+function AccountBar(props) {
+    const setScreen = useSetRecoilState(SCREEN);
     const MainColor = "#6287F7";
     const LogoutColor = "#b52121";
 
-    const interface_name = useRecoilValue(INTERFACE_NAME);
-
     // The sidenav is excluded from DOM control discovery (see domControls.js) so its items can't
-    // collide with same-named buttons in the page body. Every destination is already a NAV_INTENT
-    // except Logout, so it is registered here — with confirmation, since a misheard word should
-    // never sign someone out.
+    // collide with same-named buttons in the page body; this bar's class matches that exclusion
+    // too. Profile and Settings are already NAV_INTENTs; Logout is registered here — with
+    // confirmation, since a misheard word should never sign someone out.
     useVoiceCommands('sidenav', [
         {
             id: 'sidenav.logout',
@@ -183,19 +180,57 @@ function Sidenav(props) {
     ]);
 
     return (
+        <div class={"sidenav-accountbar " + (props.horizontal ? "sidenav-accountbar-horizontal" : "")}>
+            <div class="sidenav-accountbar-icon" title="Profile" onClick={() => {setScreen(1); document.location.hash = "profile";}}>
+                <AccountCircleIcon style={{color: MainColor}}/>
+            </div>
+            <div class="sidenav-accountbar-icon" title="Settings" onClick={() => {setScreen(10); document.location.hash = "settings";}}>
+                <SettingsIcon style={{color: MainColor}}/>
+            </div>
+            <div class="sidenav-accountbar-icon" title="Log out" onClick={() => firebase.auth().signOut()}>
+                <ExitToAppIcon style={{color: LogoutColor}}/>
+            </div>
+        </div>
+    );
+}
+
+// the sidenav
+function Sidenav(props) {
+    const MainColor = "#6287F7";
+
+    const interface_name = useRecoilValue(INTERFACE_NAME);
+
+    return (
         <div class="sidenav-wrapper">
             <div class="sidenav-logo-title">{interface_name}</div>
             <div class="sidenav-logo-subtitle"><b>the</b> quiz game</div>
             <div class="sidenav-tabs-wrapper">
-                <SidenavItem label="Profile" icon={<AccountCircleIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(1); document.location.hash = "profile";}} textColor={MainColor}/>
-                <SidenavItem label="Dashboard" icon={<DashboardIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(2); document.location.hash = "dashboard";}} textColor={MainColor}/>
+                <SidenavItem label="Home" icon={<HomeIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(2); document.location.hash = "home";}} textColor={MainColor}/>
                 <SidenavItem label="Play" icon={<SportsEsportsIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(3); document.location.hash = "play";}} textColor={MainColor}/>
                 <SidenavItem label="Record" icon={<MicIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(4); document.location.hash = "record";}} textColor={MainColor}/>
-                <SidenavItem label="Leaderboards" icon={<EmojiEventsIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(5); document.location.hash = "leaderboards";}} textColor={MainColor}/>
-                <SidenavItem label="AI Models" icon={<MemoryIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(9); document.location.hash = "ai-leaderboard";}} textColor={MainColor}/>
-                <SidenavItem label="Model Prefs" icon={<TuneIcon style={{color: MainColor}}/>} setScreen={() => {props.setScreen(10); document.location.hash = "model-preferences";}} textColor={MainColor}/>
-                <SidenavItem label="Logout" icon={<ExitToAppIcon style={{color: LogoutColor}}/>} textColor={LogoutColor} setScreen={() => firebase.auth().signOut()}/>
             </div>
+            <AccountBar/>
+        </div>
+    );
+}
+
+// Sidenav + header + body: the frame every page except Home, the game and login shares.
+function SidenavPage(props) {
+    const setScreen = useSetRecoilState(SCREEN);
+    return (
+        <div class="big-white-panel-wrapper">
+            <div class="big-white-panel">
+                <div class="content-wrapper">
+                    <Sidenav setScreen={setScreen}/>
+                    <div class="page-body-wrapper">
+                        <PageHeader title={props.title} caption={props.caption}/>
+                        <div class="page-body-content-wrapper">
+                            {props.children}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <TutorialBtn2/>
         </div>
     );
 }
@@ -299,7 +334,7 @@ function BigWhitePanel() {
         // Authorization callback
         function authCallback() {
             const windowhash = window.location.hash.substring(1);
-            if (windowhash === "dashboard") {
+            if (windowhash === "home" || windowhash === "dashboard") {
                 setScreen(2);
             } else if (windowhash === "profile") {
                 setScreen(1);
@@ -310,9 +345,8 @@ function BigWhitePanel() {
                 setScreen(4);
             } else if (windowhash === "leaderboards") {
                 setScreen(5);
-            } else if (windowhash === "ai-leaderboard") {
-                setScreen(9);
-            } else if (windowhash === "model-preferences") {
+                setPlayScreen("home");
+            } else if (windowhash === "settings" || windowhash === "model-preferences") {
                 setScreen(10);
             } else if (windowhash === "tutorial") {
                 setScreen(8);
@@ -461,142 +495,43 @@ function BigWhitePanel() {
     } 
     else if(screen === 1) { // profile
         return (
-            <div class="big-white-panel-wrapper">
-                <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="Profile" caption="Track your statistics, match history, recordings, and rating!"/>
-                            <div class="page-body-content-wrapper">
-                                <Profile/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <TutorialBtn2/>
-            </div>
+            <SidenavPage title="Profile" caption="Track your statistics, match history, recordings, and rating!">
+                <Profile/>
+            </SidenavPage>
         );
     }
-    else if(screen === 3) { // select gamemode / lobby
-        if(playScreen === 'casualsolo'){
+    else if(screen === 3 || screen === 5) { // select gamemode / lobby / leaderboards (a Play tab)
+        const playCaption = "Play with friends, solo, or compete on the ladder!";
+        if(screen === 3 && playScreen === 'casualsolo'){
             return (
-                <div class="big-white-panel-wrapper">
-                    <div class="big-white-panel">
-                        <div class="content-wrapper">
-                            <Sidenav setScreen={setScreen}/>
-                            <div class="page-body-wrapper">
-                                <PageHeader title="Play" caption="Play with friends, solo, or compete on the ladder!"/>
-                                <div class="page-body-content-wrapper">
-                                    <StandardLobby/>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <TutorialBtn2/>
-                </div>
+                <SidenavPage title="Play" caption={playCaption}>
+                    <StandardLobby/>
+                </SidenavPage>
             );
-        } else if(playScreen === 'custom'){
+        } else if(screen === 3 && playScreen === 'custom'){
             return (
-                <div class="big-white-panel-wrapper">
-                    <div class="big-white-panel">
-                        <div class="content-wrapper">
-                            <Sidenav setScreen={setScreen}/>
-                            <div class="page-body-wrapper">
-                                <PageHeader title="Play" caption="Play with friends, solo, or compete on the ladder!"/>
-                                <div class="page-body-content-wrapper">
-                                    <Lobby/>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <TutorialBtn2/>
-                </div>
+                <SidenavPage title="Play" caption={playCaption}>
+                    <Lobby/>
+                </SidenavPage>
             );
         } else {
             return (
-                <div class="big-white-panel-wrapper">
-                    <div class="big-white-panel">
-                        <div class="content-wrapper">
-                            <Sidenav setScreen={setScreen}/>
-                            <div class="page-body-wrapper">
-                                <PageHeader title="Play" caption="Play with friends, solo, or compete on the ladder!"/>
-                                <div class="page-body-content-wrapper">
-                                    <Play/>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <TutorialBtn2/>
-                </div>
+                <SidenavPage title="Play" caption={playCaption}>
+                    <Play tab={screen === 5 ? "leaderboards" : "games"}/>
+                </SidenavPage>
             );
-        } 
+        }
     } else if(screen === 4) { // Shop
         return (
-            <div class="big-white-panel-wrapper">
-                <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="Record" caption="Record questions for other users to play!"/>
-                            <div class="page-body-content-wrapper">
-                                <Shop/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <TutorialBtn2/>
-            </div>
+            <SidenavPage title="Record" caption="Record questions for other users to play!">
+                <Shop/>
+            </SidenavPage>
         );
-    } else if(screen === 5) { // leaderboards
+    } else if(screen === 10) { // settings (model preferences)
         return (
-            <div class="big-white-panel-wrapper">
-                <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="Leaderboards" caption="Check out the top players across the globe!"/>
-                            <div class="page-body-content-wrapper">
-                                <Leaderboards/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <TutorialBtn2/>
-            </div>
-        );
-    } else if(screen === 9) { // AI model leaderboard (mock)
-        return (
-            <div class="big-white-panel-wrapper">
-                <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="AI Model Leaderboard" caption="See how ASR models stack up on transcription accuracy!"/>
-                            <div class="page-body-content-wrapper">
-                                <AiModelLeaderboard/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <TutorialBtn2/>
-            </div>
-        );
-    } else if(screen === 10) { // model preferences
-        return (
-            <div class="big-white-panel-wrapper">
-                <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="Model Preferences" caption="Choose which ASR models Earudite uses for you!"/>
-                            <div class="page-body-content-wrapper">
-                                <ModelPreferences/>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <TutorialBtn2/>
-            </div>
+            <SidenavPage title="Settings" caption="Choose which ASR models Earudite uses for you!">
+                <ModelPreferences/>
+            </SidenavPage>
         );
     } else if(screen === 6){ // in-game
         return (
@@ -622,24 +557,16 @@ function BigWhitePanel() {
                 </div>
             </div>
         );
-    } else { //dashboard (screen === 2)
+    } else { // home (screen === 2)
         return (
             <div class="big-white-panel-wrapper">
                 <div class="big-white-panel">
-                    <div class="content-wrapper">
-                        <Sidenav setScreen={setScreen}/>
-                        <div class="page-body-wrapper">
-                            <PageHeader title="Dashboard" caption="Catch up on the latest news and updates!"/>
-                            <div class="page-body-content-wrapper">
-                                <Dashboard/>
-                            </div>
-                        </div>
-                    </div>
+                    <Home footer={<AccountBar horizontal/>}/>
                 </div>
                 <TutorialBtn2/>
             </div>
         );
-    } 
+    }
 }
 
 export default BigWhitePanel;

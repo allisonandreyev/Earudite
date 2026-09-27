@@ -68,7 +68,12 @@ wait_for_port() {
 
 echo "=== 1/5 quizzr-server (data flow, :5110) ==="
 if check_port_free 5110 "quizzr-server"; then
+  # OBJC_DISABLE_INITIALIZE_FORK_SAFETY: gunicorn forks its workers, and on macOS a forked child
+  # that touches an Objective-C class the parent was mid-initializing is killed outright. Once the
+  # original workers die for any reason, every replacement crashes at boot and the master
+  # respawns them forever — :5110 stays bound but never answers, so login hangs on "Loading".
   ( cd "$ROOT_DIR/quizzr-server" && \
+    OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \
     CONNECTION_STRING="$CONNECTION_STRING" nohup "$PY_BIN/gunicorn" \
       -w 4 -b 0.0.0.0:5110 "server:create_app()" >> /tmp/quizzr_server.log 2>&1 & disown )
   wait_for_port 5110 "quizzr-server"

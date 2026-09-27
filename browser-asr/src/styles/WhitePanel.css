@@ -112,6 +112,43 @@
 
 
 
+/* Profile / Settings / Logout icons. Vertical at the foot of the sidenav; horizontal (with a
+   divider above) along the bottom of Home. The class keeps "sidenav" in its name on purpose so
+   voice control treats it as navigation — see NAV_REGION_SELECTOR in domControls.js. */
+.sidenav-accountbar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-bottom: 1.25rem;
+}
+
+.sidenav-accountbar-horizontal {
+    flex-direction: row;
+    justify-content: center;
+    width: 100%;
+    padding: 0.75rem 0 0 0;
+    border-top: solid 1px #eff2fc;
+}
+
+.sidenav-accountbar-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    margin: 0.2rem;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.sidenav-accountbar-icon:hover {
+    background-color: #dfe6fb;
+}
+
+.sidenav-accountbar-horizontal .sidenav-accountbar-icon {
+    margin: 0 0.75rem;
+}
+
 /* PAGE CONTENT */
 
 .page-body-wrapper {

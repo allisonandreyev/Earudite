@@ -20,7 +20,16 @@
 }
 
 .play-gamemode-btn-selected {
-    border-bottom: 4px solid #EFF2FC;
+    border-bottom: 4px solid #6287F7;
+    font-weight: 600;
+}
+
+/* Leaderboards scrolls on its own; min-height: 0 lets it shrink inside this fixed-height column
+   instead of pushing past the bottom of the panel. */
+.play-leaderboards-wrapper {
+    flex-grow: 1;
+    min-height: 0;
+    display: flex;
 }
 
 .play-gamemodecards-wrapper {
