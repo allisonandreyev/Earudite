@@ -147,9 +147,18 @@ const BUZZ_COOLDOWN_MS = 2000;
 const WEB_SPEECH_BUZZ_TOKENS = new Set([
   'buzz', 'buzzed', 'buzzer', 'buzzes', 'buzzing', 'buss',
 ]);
-// Only the last couple of words count, so a wake word has to be recent rather than anywhere in a
-// continuously growing transcript.
-const WEB_SPEECH_TAIL_WORDS = 3;
+// How long a sent buzz blocks another one while the server's reply is on its way. Cleared early
+// by the reply itself (buzzed / buzzrejected), so this only matters if the reply is lost.
+const BUZZ_PENDING_MS = 1500;
+
+// Web Speech transcript -> tokens. The raw tokens are kept (they become the answer text); matching
+// normalises each one on its own, so indexes line up between the two.
+function speechTokens(text) {
+  return text ? text.trim().split(/\s+/).filter(Boolean) : [];
+}
+function normToken(token) {
+  return token.toLowerCase().replace(/[^a-z']/g, '');
+}
 
 // Set window.EARUDITE_VOICE_DEBUG = true in the console to trace what whisper heard and why a
 // keyword did or did not fire. Off by default so a normal game logs nothing.
@@ -252,6 +261,25 @@ function AnswerBox(props) {
 
   const lastBuzzDetectRef = useRef(0);
 
+  // Web Speech bookkeeping — see the transcript effect below.
+  //
+  // The recognizer produces ONE running transcript for the whole question. Each phase (waiting to
+  // buzz, answering) only looks at the tokens from consumedWordsRef onwards; moving that index is
+  // how a phase "clears" the transcript. The old code called resetTranscript() instead, and that
+  // is not a clear: react-speech-recognition implements it as abort() + restart, and words spoken
+  // while the recognizer restarts are lost. It ran on buzz detection AND again when the server
+  // echoed the buzz, which landed right as the player started answering — so their first words
+  // vanished, and rapid Buzz/Submit clicking churned the recognizer until it stopped responding.
+  const consumedWordsRef = useRef(0);
+  const wakeTranscriptRef = useRef('');
+  // Set when this client chose where the answer starts as it sent its buzz, so the server's echo
+  // does not move that point again.
+  const phaseMarkedRef = useRef(false);
+  const buzzSentAtRef = useRef(0);
+  // One submit per buzz. A second one (double click, Enter plus spoken "submit") could only be
+  // refused by the server, with an error alert.
+  const submittedRef = useRef(false);
+
   // Local (in-browser) Whisper transcription scratch buffer — separate from the PCM stream sent
   // to the server, which is storage-only now (the raw answer recording still needs to reach the
   // backend as labeled training data; only the transcription itself moved client-side).
@@ -298,6 +326,7 @@ function AnswerBox(props) {
   // is affordable against a 15s answer window and the audio never leaves the machine.
   const {
     transcript: wakeTranscript,
+    interimTranscript: wakeInterim,
     resetTranscript: resetWakeTranscript,
     browserSupportsSpeechRecognition,
   } = useSpeechRecognition();
@@ -306,6 +335,7 @@ function AnswerBox(props) {
   // it survives the screen change into a game and shows who owns the recognizer as well.
   const [asrError, setAsrError] = useState('');
   useEffect(() => { buzzerRef.current = props.buzzer; }, [props.buzzer]);
+  wakeTranscriptRef.current = wakeTranscript;
   useEffect(() => { answerRef.current = props.answer; }, [props.answer]);
 
   function complete(answer) {
@@ -326,12 +356,46 @@ function AnswerBox(props) {
     passCoversUpToRef.current = Date.now();
   }
 
-  function buzzin() {
+  // Everything heard so far belongs to the phase that is ending.
+  function markConsumed() {
+    consumedWordsRef.current = speechTokens(wakeTranscriptRef.current).length;
+  }
+
+  // A real restart of the recognizer, for when the in-progress utterance must be thrown away.
+  function resetSpeech() {
+    resetWakeTranscript();
+    wakeTranscriptRef.current = '';
+    consumedWordsRef.current = 0;
+  }
+
+  // fromVoice: the wake-word path has already set where the answer starts (right after "buzz").
+  function buzzin(fromVoice) {
+    // Someone holds the buzz, or ours is still in flight: another emit could only come back as a
+    // "can't buzz" alert.
+    if (buzzerRef.current) return;
+    const now = Date.now();
+    if (now - buzzSentAtRef.current < BUZZ_PENDING_MS) return;
+    buzzSentAtRef.current = now;
+
+    if (fromVoice !== true && webSpeechRef.current) {
+      // Clicked (or Space). Words already said are not the answer. If an utterance is still in
+      // progress — almost always the question clip playing through the speakers — it has to be
+      // cut off with a restart: marking an index is not enough, because the recognizer keeps
+      // revising that utterance and would fold the clip's words into the start of the answer.
+      // One restart here is covered by the player's reaction time before they start talking.
+      if (wakeInterim) resetSpeech();
+      else markConsumed();
+    }
+    phaseMarkedRef.current = true;
     props.buzz();
     setTimeout(()=>{ if (textAnswer.current) textAnswer.current.focus(); }, 100);
   }
 
   function submit1(textOverride) {
+    if (!(buzzerRef.current && buzzerRef.current === usernameRef.current)) return;
+    if (submittedRef.current) return;
+    submittedRef.current = true;
+    markConsumed();
     const answer = textOverride !== undefined ? textOverride : props.answer;
     // Discard the audio this answer was transcribed from, on EVERY submit path.
     //
@@ -378,6 +442,9 @@ function AnswerBox(props) {
   // On question change: reset server buffer and ASR state
   useEffect(() => {
     resetLocalBuffer();
+    // The one place the recognizer is restarted routinely: between questions nobody is speaking
+    // an answer, so nothing is lost, and it keeps the running transcript from growing all game.
+    if (webSpeechRef.current) resetSpeech();
     if (speechModeRef.current === 2) {
       socketRef.current.emit('reset_audio_stream', {});
     } else if (processorRef.current) {
@@ -413,8 +480,11 @@ function AnswerBox(props) {
     // eslint-disable-next-line
   }, [props.buzzer, username])
 
+  // Local whisper is only the fallback for browsers without Web Speech. Warming it up anyway
+  // downloaded and compiled the model on every game start, pegging a core for ~10s right when the
+  // first question starts — a large part of why the game felt laggy early on.
   useEffect(()=> {
-    localWhisper.warmup();
+    if (!browserSupportsSpeechRecognition) localWhisper.warmup();
     // eslint-disable-next-line
   },[]);
 
@@ -501,9 +571,9 @@ function AnswerBox(props) {
   // interim results continuously, so the answer box fills in as you speak and "submit" fires the
   // moment you say it.
   //
-  // Same shape as VoiceNav: start on mount, listen continuously, read the tail of the transcript,
-  // reset after acting. The only thing that changes between the two phases is what the tail is
-  // scanned for — a wake word before a buzz, a submit keyword after one.
+  // Start on mount and listen continuously. Each phase reads the transcript from its own boundary
+  // (consumedWordsRef) rather than restarting the recognizer; what changes between the two phases
+  // is what those words are scanned for — a wake word before a buzz, a submit keyword after one.
   //
   // Note the raw microphone audio still streams to the backend as labelled training data exactly
   // as before (see the 'audio_chunk' emit in startPCMStream); that path is untouched by this.
@@ -513,7 +583,7 @@ function AnswerBox(props) {
 
   useEffect(() => {
     if (voiceOn) {
-      resetWakeTranscript();
+      resetSpeech();
       claimMic('answerbox');
     } else {
       // Released rather than merely ignored: on Chrome this audio goes to Google's servers, so
@@ -526,48 +596,63 @@ function AnswerBox(props) {
 
   useEffect(() => () => { releaseMic('answerbox'); }, []);
 
-  // Clear the transcript on every buzz transition, so the wake word itself is never treated as the
-  // first word of the answer, and a previous answer never bleeds into the next buzz.
+  // Move the phase boundary on every buzz transition, so the wake word is never treated as the
+  // first word of the answer and a previous answer never bleeds into the next one.
   useEffect(() => {
-    resetWakeTranscript();
+    submittedRef.current = false;
+    buzzSentAtRef.current = 0;
+    if (!(props.buzzer && props.buzzer === username && phaseMarkedRef.current)) markConsumed();
+    phaseMarkedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.buzzer, props.question]);
+  }, [props.buzzer]);
 
   useEffect(() => {
     if (!voiceOn || !wakeTranscript) return;
+    const tokens = speechTokens(wakeTranscript);
+    const from = Math.min(consumedWordsRef.current, tokens.length);
 
     if (buzzedInByMe) {
-      // Buzzed in: the transcript IS the answer. Interim results mean this updates as you talk.
-      const { cleaned, hasSubmit } = processTranscription(wakeTranscript);
-      if (voiceDebug()) console.log('[voice] answer', JSON.stringify(wakeTranscript), '| submit:', hasSubmit);
+      if (submittedRef.current) return;
+      // Buzzed in: everything after the boundary IS the answer. Interim results mean this updates
+      // as you talk.
+      const { cleaned, hasSubmit } = processTranscription(tokens.slice(from).join(' '));
+      if (voiceDebug()) console.log('[voice] answer', JSON.stringify(cleaned), '| submit:', hasSubmit);
       props.setAnswer(cleaned);
-      if (hasSubmit) {
-        // Reset first: submit1() clears the answer box, and a transcript still holding "…submit"
-        // would immediately refill it and fire again on the next interim result.
-        resetWakeTranscript();
-        actionRef.current.submit1(cleaned);
-      }
+      if (hasSubmit) actionRef.current.submit1(cleaned);
       return;
     }
 
     if (props.buzzer) return;   // someone else has it; nothing to listen for
 
-    const words = wakeTranscript.trim().toLowerCase()
-      .replace(/[^a-z\s']/g, ' ').split(/\s+/).filter(Boolean);
-    const recent = words.slice(-WEB_SPEECH_TAIL_WORDS);
-    const hit = recent.find((w) => WEB_SPEECH_BUZZ_TOKENS.has(w));
-    const now = Date.now();
-    if (hit && now - lastBuzzDetectRef.current > BUZZ_COOLDOWN_MS) {
-      if (voiceDebug()) console.log('[voice] BUZZ (web speech) on', JSON.stringify(hit));
-      lastBuzzDetectRef.current = now;
-      resetWakeTranscript();
-      // Nothing said before the buzz belongs in the answer box.
-      resetLocalBuffer();
-      socketRef.current.emit('reset_audio_stream', {});
-      actionRef.current.buzzin();
+    // Scan every word since the boundary, not a fixed tail. The recognizer often delivers "buzz"
+    // in the same update as the words that follow it — including the question clip's own speech
+    // coming through the speakers — which pushed it out of the old 3-word tail before it was ever
+    // looked at. That is the "buzz doesn't work when the audio has other words in it" report.
+    for (let i = from; i < tokens.length; i++) {
+      if (!WEB_SPEECH_BUZZ_TOKENS.has(normToken(tokens[i]))) continue;
+      if (voiceDebug()) console.log('[voice] BUZZ (web speech) on', JSON.stringify(tokens[i]));
+      // The answer starts right after the wake word, so "buzz Mozart submit" in one breath works.
+      consumedWordsRef.current = i + 1;
+      actionRef.current.buzzin(true);
+      break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wakeTranscript, voiceOn, buzzedInByMe, props.buzzer]);
+
+  // The server refuses a buzz during the gap, or a second one on the same question. Let the next
+  // attempt through at once instead of waiting out BUZZ_PENDING_MS.
+  useEffect(() => {
+    const onRejected = () => { buzzSentAtRef.current = 0; phaseMarkedRef.current = false; };
+    // A reconnect gets a new sid, and the server keeps answer audio per sid. Re-open the stream so
+    // the recording keeps landing in the training data.
+    const onConnect = () => { if (processorRef.current) socket.emit('start_audio_stream', {}); };
+    socket.on('buzzrejected', onRejected);
+    socket.on('connect', onConnect);
+    return () => {
+      socket.off('buzzrejected', onRejected);
+      socket.off('connect', onConnect);
+    };
+  }, [socket]);
 
   // Surface a recogniser failure rather than letting it look like the mic simply isn't hearing
   // you. localWhisper recovers on its own now (it rebuilds the worker), so this clears itself.
@@ -589,6 +674,10 @@ function AnswerBox(props) {
     processor.onaudioprocess = (e) => {
       const pcm = downsampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate);
       socketRef.current.emit('audio_chunk', pcm.buffer);
+
+      // With Web Speech handling recognition nothing reads the local buffer. Building it anyway
+      // allocated and copied up to 10s of audio on the main thread every ~85ms, all game.
+      if (webSpeechRef.current) return;
 
       const merged = new Float32Array(localBufferRef.current.length + pcm.length);
       merged.set(localBufferRef.current);

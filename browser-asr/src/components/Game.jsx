@@ -444,6 +444,8 @@ function Game() {
   const stateRef = useRef(state);
   const gameSettingsRef = useRef(gameSettings);
   const usernameRef = useRef(username);
+  const authtokenRef = useRef(authtoken);
+  useEffect(() => { authtokenRef.current = authtoken; }, [authtoken]);
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => { gameSettingsRef.current = gameSettings; }, [gameSettings]);
   useEffect(() => { usernameRef.current = username; }, [username]);
@@ -527,6 +529,14 @@ function Game() {
       if (video) video.play();
     };
 
+    // Socket.IO reconnects on its own after any blip (backgrounded tab, network hiccup, laptop
+    // lid), but the new connection is not in the game room, so gamestate and buzz events stop
+    // arriving and the game looks frozen. Ask the server to put this connection back in.
+    const reconnectListener = () => {
+      state.socket.emit("rejoin", { auth: authtokenRef.current });
+    };
+
+    state.socket.on("connect", reconnectListener);
     state.socket.on("buzzed", buzzerListener);
     state.socket.on("gamestate", gameStateListener);
     state.socket.on("answeredincorrectly", answeredIncorrectlyListener);
@@ -535,6 +545,7 @@ function Game() {
     state.socket.on("hlsplay", hlsPlayListener);
 
     return function cleanSockets() {
+      state.socket.off("connect", reconnectListener);
       state.socket.off("buzzed", buzzerListener);
       state.socket.off("gamestate", gameStateListener);
       state.socket.off("answeredincorrectly", answeredIncorrectlyListener);

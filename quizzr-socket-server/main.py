@@ -73,7 +73,9 @@ def get_whisper_model(model_id):
 # Per-socket streaming buffers, kept purely for storage: the client now transcribes locally
 # (in-browser, tiny model) and only streams PCM here so the raw answer recording can still be
 # uploaded to the backend as labeled training data on submit (see the 'answer' handler below).
-audio_buffers = {}       # sid -> np.ndarray (float32, 16 kHz)
+# sid -> list of float32 16 kHz chunks. Kept as a list and joined only when an answer is uploaded:
+# concatenating on every chunk re-copied the whole question's audio ~12 times a second per player.
+audio_buffers = {}
 STREAM_SAMPLE_RATE = 16000
 MIN_STREAM_SAMPLES = int(0.5 * STREAM_SAMPLE_RATE)   # minimum buffered audio to upload
 
@@ -95,6 +97,14 @@ def resolve_lobby(username):
     """
     lobbycode = current_lobby.get(username)
     if lobbycode is not None:
+        # The mapping survived a reconnect (see user_disconnected), but room membership is per
+        # sid, so the new socket was never in the game room. It still reached the server — a buzz
+        # was accepted — but every broadcast (gamestate, buzzed, answer verdicts) went only to the
+        # old, dead sid. For that player the game simply froze.
+        if clients.get(request.sid) != username:
+            clients[request.sid] = username
+            reverse_clients[username] = request.sid
+            join_room(lobbycode)
         return lobbycode
 
     for code, lob in lobbies.items():
@@ -187,8 +197,22 @@ def emit_game_state(sleep_time=0.1):  # emits the game state (time left on clock
 def emit_lobby_state(
         sleep_time=0.1):  # emits the lobby state (synchronizes lobby settings between all players in the lobby)
     while True:
-        for lobbycode in lobbies:
-            socketio.emit('lobbystate', lobbies[lobbycode].state(), to=lobbycode)
+        # list(): emit() can yield, and a lobby created or reaped meanwhile raised "dictionary
+        # changed size during iteration" — which killed this loop for good and silently stopped
+        # every lobby's settings from syncing.
+        for lobbycode in list(lobbies):
+            lob = lobbies.get(lobbycode)
+            # Nobody needs lobby state once the game has started, and broadcasting it anyway is
+            # what trapped players in "Game Settings": the Play page treats any lobbystate as
+            # "you are now in this lobby", so the in-flight packets arriving just after Quit or
+            # "Back to home" dropped the player back into a lobby they had already left, where
+            # START could only fail.
+            if lob is None or lob.game_started:
+                continue
+            try:
+                socketio.emit('lobbystate', lob.state(), to=lobbycode)
+            except Exception as e:
+                print(f"Error in emit_lobby_state for {lobbycode}: {e}")
         eventlet.sleep(sleep_time)
 
 
@@ -278,10 +302,8 @@ def sessions():
 def lobby_loading(json, methods=['GET', 'POST']):
     user = get_user(json['auth'])
     lobby = resolve_lobby(user['username'])
-    if lobby is None:
-        emit('alert', ['error', 'You are not in a lobby'])
-        return
-    username = user['username']
+    if lobby is None or lobby not in lobbies or lobbies[lobby].game_started:
+        return  # start_game reports this one; alerting twice only adds noise
     emit('lobbyloading', {}, to=lobby)
 
 
@@ -398,8 +420,12 @@ def start_game(json, methods=['GET', 'POST']):
     # Start game with correct lobby parameters according to key
     user = get_user(json['auth'])
     lobby = resolve_lobby(user['username'])
-    if lobby is None:
-        emit('alert', ['error', 'You are not in a lobby'])
+    if lobby is None or lobby not in lobbies or lobbies[lobby].game_started:
+        # The client is showing a lobby that no longer exists for it (left, reaped, or its game
+        # already ran). Alerting and returning left it on that screen with a START button that
+        # could never work; closelobby sends it back to the Play page to create a fresh one.
+        emit('closelobby', {})
+        emit('alert', ['error', 'That lobby has closed. Create or join a new one.'])
         return
 
     single_game = game.Game(lobbies[lobby], socketio)
@@ -424,8 +450,10 @@ def buzz(json, methods=['GET', 'POST']):
     if buzzed == 2:
         emit('buzzed', username, to=lobby)
     elif buzzed == 1:
+        emit('buzzrejected', {})
         emit('alert', ['error', "You can't buzz twice"])
     elif buzzed == 0:
+        emit('buzzrejected', {})
         emit('alert', ['error', "You can't buzz right now"])
 
 
@@ -441,11 +469,13 @@ def answer(json, methods=['GET', 'POST']):
 
     # Snapshot the streamed answer audio before game.answer() yields to eventlet
     sid = request.sid
-    buf = audio_buffers.get(sid)
-    answer_audio = buf.copy() if buf is not None and len(buf) > 0 else None
+    chunks = audio_buffers.get(sid)
+    answer_audio = np.concatenate(chunks) if chunks else None
     auth_token = json['auth']
 
     answered = games[lobby].answer(username, json['answer'])
+    if answered is None:
+        return  # a duplicate of an answer already being checked; the first one decides
     if not answered:
         emit('alert', ['error', "You can't answer right now"])
         return
@@ -512,8 +542,21 @@ def leaderboards(json, methods=['GET', 'POST']):
         emit('leaderboards', {'leaderboard': leaderboard1[0:10], 'rank': [-1, -1]})
 
 
+# Sent by the client on every (re)connect. resolve_lobby does the actual work of putting the new
+# sid back into its game room; without this the player would only be re-joined on their next
+# buzz or answer, and would see a frozen game until then.
+@socketio.on('rejoin')
+def rejoin(json, methods=['GET', 'POST']):
+    try:
+        user = get_user(json['auth'])
+    except Exception:
+        return
+    resolve_lobby(user['username'])
+
+
 @socketio.on('disconnect')
 def user_disconnected():
+    audio_buffers.pop(request.sid, None)
     username = clients.get(request.sid)
     if username is None:
         return
@@ -589,7 +632,7 @@ def _upload_answer_audio(wav_bytes, auth_token, meta):
 @socketio.on('start_audio_stream')
 def start_audio_stream(data):
     sid = request.sid
-    audio_buffers[sid] = np.array([], dtype=np.float32)
+    audio_buffers[sid] = []
 
 
 @socketio.on('audio_chunk')
@@ -597,15 +640,14 @@ def handle_audio_chunk(data):
     sid = request.sid
     if sid not in audio_buffers:
         return
-    chunk = np.frombuffer(data, dtype=np.float32)
-    audio_buffers[sid] = np.concatenate([audio_buffers[sid], chunk])
+    audio_buffers[sid].append(np.frombuffer(data, dtype=np.float32))
 
 
 @socketio.on('reset_audio_stream')
 def reset_audio_stream(data):
     """Clear the buffer (used on buzz-in and question change)."""
     sid = request.sid
-    audio_buffers[sid] = np.array([], dtype=np.float32)
+    audio_buffers[sid] = []
 
 
 @socketio.on('stop_audio_stream')

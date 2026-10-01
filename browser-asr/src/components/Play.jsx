@@ -128,6 +128,19 @@ const gameSettingsList = [
 ];
 
 
+// When this client last asked to create or join a lobby. The Play page's lobbystate listeners act
+// only inside this window. They used to act on ANY lobbystate, so a stale one — still in flight
+// from the lobby of a game the player had just quit or finished — pulled them straight back into
+// that lobby's settings screen, where START could never work.
+let lobbyRequestedAt = 0;
+const LOBBY_REQUEST_WINDOW_MS = 10000;
+function requestLobby() { lobbyRequestedAt = Date.now(); }
+function takeLobbyRequest() {
+    if (Date.now() - lobbyRequestedAt > LOBBY_REQUEST_WINDOW_MS) return false;
+    lobbyRequestedAt = 0;
+    return true;
+}
+
 // card for a gamemode that is coming soon
 function GamemodeComingSoonCard(props) {
     const alert = useAlert();
@@ -178,6 +191,7 @@ function StartCasualSoloLobbyButton(props) {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
+            if (!takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -199,6 +213,7 @@ function StartCasualSoloLobbyButton(props) {
     });
 
     function StartLobby() {
+        requestLobby();
         socket.emit("startlobby", {
             auth: authtoken,
             gamemode: "casualsolo",
@@ -223,6 +238,7 @@ function StartCustomLobbyButton() {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
+            if (!takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -244,6 +260,7 @@ function StartCustomLobbyButton() {
     });
 
     function StartLobby() {
+        requestLobby();
         socket.emit("startlobby", {
             auth: authtoken,
             gamemode: "custom",
@@ -276,6 +293,7 @@ function JoinCustomLobbyCard(props) {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
+            if (!takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -301,6 +319,7 @@ function JoinCustomLobbyCard(props) {
     }
 
     function joinLobby() {
+        requestLobby();
         socket.emit("joinlobby", {
             auth: authtoken,
             lobby: text,

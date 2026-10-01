@@ -6,6 +6,7 @@ import json
 import recordings_database as rd
 import os
 import copy
+import threading
 # from inference.classify import classify_and_upload
 
 # os.environ.get("HLS_HANDSHAKE") = "Lt`cw%Y9sg*bJ_~KZ#;|rbfI)nx[r5"
@@ -28,6 +29,16 @@ def get_minutes_seconds(seconds):
 # Generous versus a normal /answer round-trip, but bounded: a slow or hung backend must not be
 # able to freeze a question forever.
 ANSWER_GRACE_SECONDS = 10
+
+# Every backend call below used to have no timeout. They run on the eventlet hub, and the ones in
+# gamestate() run inside emit_game_state — ONE loop that serves every game — so a single slow
+# /answer_full or HLS unlock stopped the clock and all broadcasts for every game at once. That is
+# the "game froze" report. Bounded now; a failed call degrades that one step instead.
+HTTP_TIMEOUT = 5
+# Answer checks must finish inside the grace window so the timeout below can still fire.
+ANSWER_HTTP_TIMEOUT = ANSWER_GRACE_SECONDS - 2
+# Game setup fetches a VTT per question, so it gets more room than a single in-game call.
+SETUP_HTTP_TIMEOUT = 15
 
 
 class Game:
@@ -59,12 +70,14 @@ class Game:
                 os.environ.get("BACKEND_URL") + "/question",
                 params={"batchSize": self.questions_num * self.rounds_num},
                 headers={"Authorization": self.auth_token},
+                timeout=SETUP_HTTP_TIMEOUT,
             ).json()["results"]
             self.questions = []  # id, qb_id, time length
             for question in raw_questions:
                 final_vtt = requests.get(
                     os.environ.get("BACKEND_URL") + "/hls/vtt/" + question["audio"][0]["id"] + "?batch",
                     headers={"Authorization": self.auth_token},
+                    timeout=SETUP_HTTP_TIMEOUT,
                 )
 
                 self.questions.append(
@@ -99,6 +112,7 @@ class Game:
                         "qb_ids": [str(i[1]) for i in self.questions],
                         "expiry": str(expiry_time)
                     },
+                    timeout=SETUP_HTTP_TIMEOUT,
                 )
                 print(hls_response.json())
                 for pair in hls_response.json()["streams"]:
@@ -108,7 +122,9 @@ class Game:
             except Exception as e:
                 print(e)
                 self.good_game = False
-                socketio.emit("startgamefailed")
+                # Scoped to this lobby: unscoped, it kicked every player on the server out of
+                # whatever lobby they were in.
+                socketio.emit("startgamefailed", to=self.gamecode)
                 socketio.emit(
                     "alert", ["error", "Starting game failed"], to=self.gamecode
                 )
@@ -172,12 +188,13 @@ class Game:
             unlock_response = requests.post(
                 os.environ.get("HLS_URL") + "/api/unlock",
                 data={"handshake": os.environ.get("HLS_HANDSHAKE"), "rid": self.hls_rids[0]},
+                timeout=SETUP_HTTP_TIMEOUT,
             ).json()
             self.hls_tokens[0] = unlock_response["token"]
         except Exception as e:
             print(e)
             self.good_game = False
-            socketio.emit("startgamefailed")
+            socketio.emit("startgamefailed", to=self.gamecode)
             socketio.emit("alert", ["error", "Starting game failed"], to=self.gamecode)
 
     # returns the current game state
@@ -250,7 +267,8 @@ class Game:
                 # showed nothing at all to players who never buzzed.
                 try:
                     correct_answer = requests.get(
-                        os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1])
+                        os.environ.get("BACKEND_URL") + "/answer_full/" + str(self.answering_ids[self.round - 1][self.question - 1]),
+                        timeout=HTTP_TIMEOUT,
                     ).json()
                     self.current_answer_text = correct_answer.get('answer', '') or ''
                 except Exception as e:
@@ -276,7 +294,9 @@ class Game:
                         self.question = 0
                         self.active_gap = [False, 0]
                         self.active_game = False
-                        self.save_game()
+                        # Off the game loop: save_game makes several blocking backend/DB
+                        # calls, and emit_game_state serves every game on the server.
+                        threading.Thread(target=self._save_game_safely, daemon=True).start()
 
                 if unlock_next:
                     question_idx = (
@@ -289,6 +309,7 @@ class Game:
                                 "handshake": os.environ.get("HLS_HANDSHAKE"),
                                 "rid": self.hls_rids[question_idx],
                             },
+                            timeout=HTTP_TIMEOUT,
                         ).json()
                         self.hls_tokens[question_idx] = unlock_response["token"]
                     except Exception as e:
@@ -348,6 +369,11 @@ class Game:
         each call site. That is the "I said Submit and it says the buzz timed out" report — the
         answer was sent, it just lost a race it should never have been in.
         """
+        # An empty submit (the player gave up) is simply wrong. Sent to the backend it came back
+        # as a 400 with no "correct" key, the KeyError killed the handler, and the buzz then hung
+        # until it timed out.
+        if not answer or not answer.strip():
+            return False
         self.answer_in_flight_until = time.time() + ANSWER_GRACE_SECONDS
         try:
             return json.loads(
@@ -355,8 +381,14 @@ class Game:
                     os.environ.get("BACKEND_URL") + "/answer",
                     params={"a": answer, "qid": qid},
                     headers={"Authorization": self.auth_token},
+                    timeout=ANSWER_HTTP_TIMEOUT,
                 ).text
             )["correct"]
+        except Exception as e:
+            # Judge it wrong rather than let the exception escape: escaping left the buzz open
+            # with no verdict, so the client sat waiting until the buzz timer ran out.
+            print(f"Answer check failed for qid {qid}: {e}")
+            return False
         finally:
             self.answer_in_flight_until = None
 
@@ -365,6 +397,10 @@ class Game:
         # if game is over, return 0
         if not self.active_buzz[0]:
             return False
+        elif self.answer_in_flight_until is not None:
+            # A second submit (double click, Enter + spoken "submit") while the first is still
+            # being checked. None tells the handler to drop it quietly; the first one decides.
+            return None
         else:
             buzz_start = self.active_buzz[1]  # save before yielding to eventlet
             correct = self._check_answer(
@@ -536,6 +572,12 @@ class Game:
             return self.gap_time
         return self.active_gap[1] + self.gap_time - time.time()
 
+    def _save_game_safely(self):
+        try:
+            self.save_game()
+        except Exception as e:
+            print(f"Saving game {self.gamecode} failed: {e}")
+
     # save game's buzz times into text
     def save_game(self):
 
@@ -564,7 +606,8 @@ class Game:
             pointsObj["ratings"].update(self.points[1])
         requests.post(
             os.environ.get("BACKEND_URL") + "/game/ratings",
-            json=pointsObj
+            json=pointsObj,
+            timeout=SETUP_HTTP_TIMEOUT,
         )
         
 
@@ -573,6 +616,7 @@ class Game:
         requests.post(
             os.environ.get("BACKEND_URL") + "/game",
             json={"id": recording_code, "session": self.recording_json},
+            timeout=SETUP_HTTP_TIMEOUT,
         )
         print(
             "Recording of game "
