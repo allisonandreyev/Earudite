@@ -276,6 +276,8 @@ function AnswerBox(props) {
   // does not move that point again.
   const phaseMarkedRef = useRef(false);
   const buzzSentAtRef = useRef(0);
+  // We paused the clip ourselves on buzzing; resume it if the server refuses that buzz.
+  const pausedForBuzzRef = useRef(false);
   // One submit per buzz. A second one (double click, Enter plus spoken "submit") could only be
   // refused by the server, with an error alert.
   const submittedRef = useRef(false);
@@ -326,7 +328,6 @@ function AnswerBox(props) {
   // is affordable against a 15s answer window and the audio never leaves the machine.
   const {
     transcript: wakeTranscript,
-    interimTranscript: wakeInterim,
     resetTranscript: resetWakeTranscript,
     browserSupportsSpeechRecognition,
   } = useSpeechRecognition();
@@ -368,8 +369,7 @@ function AnswerBox(props) {
     consumedWordsRef.current = 0;
   }
 
-  // fromVoice: the wake-word path has already set where the answer starts (right after "buzz").
-  function buzzin(fromVoice) {
+  function buzzin() {
     // Someone holds the buzz, or ours is still in flight: another emit could only come back as a
     // "can't buzz" alert.
     if (buzzerRef.current) return;
@@ -377,14 +377,23 @@ function AnswerBox(props) {
     if (now - buzzSentAtRef.current < BUZZ_PENDING_MS) return;
     buzzSentAtRef.current = now;
 
-    if (fromVoice !== true && webSpeechRef.current) {
-      // Clicked (or Space). Words already said are not the answer. If an utterance is still in
-      // progress — almost always the question clip playing through the speakers — it has to be
-      // cut off with a restart: marking an index is not enough, because the recognizer keeps
-      // revising that utterance and would fold the clip's words into the start of the answer.
-      // One restart here is covered by the player's reaction time before they start talking.
-      if (wakeInterim) resetSpeech();
-      else markConsumed();
+    // Silence the question clip NOW rather than when the server's "buzzed" echo arrives. Waiting
+    // for the echo left a full round trip of clip speech playing into the mic just as the answer
+    // phase began.
+    const video = document.getElementById("hls");
+    if (video && !video.paused) {
+      video.pause();
+      pausedForBuzzRef.current = true;
+    }
+
+    if (webSpeechRef.current) {
+      // The answer gets a fresh recognizer session, every time. Marking an index in the running
+      // transcript is not enough: the utterance in progress at the buzz is usually the clip, and
+      // the recognizer keeps revising it — and appending to it — so clip words leaked into the
+      // start of the answer. A restart throws that utterance away. Because the clip is already
+      // paused above, the new session can only hear the player. Words said in the fraction of a
+      // second the restart takes are lost, so the flow is "buzz", a beat, then the answer.
+      resetSpeech();
     }
     phaseMarkedRef.current = true;
     props.buzz();
@@ -601,6 +610,7 @@ function AnswerBox(props) {
   useEffect(() => {
     submittedRef.current = false;
     buzzSentAtRef.current = 0;
+    pausedForBuzzRef.current = false;
     if (!(props.buzzer && props.buzzer === username && phaseMarkedRef.current)) markConsumed();
     phaseMarkedRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -631,9 +641,9 @@ function AnswerBox(props) {
     for (let i = from; i < tokens.length; i++) {
       if (!WEB_SPEECH_BUZZ_TOKENS.has(normToken(tokens[i]))) continue;
       if (voiceDebug()) console.log('[voice] BUZZ (web speech) on', JSON.stringify(tokens[i]));
-      // The answer starts right after the wake word, so "buzz Mozart submit" in one breath works.
-      consumedWordsRef.current = i + 1;
-      actionRef.current.buzzin(true);
+      // buzzin() pauses the clip and restarts the recognizer, so nothing heard up to here —
+      // including the wake word and any clip speech around it — reaches the answer.
+      actionRef.current.buzzin();
       break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -642,7 +652,16 @@ function AnswerBox(props) {
   // The server refuses a buzz during the gap, or a second one on the same question. Let the next
   // attempt through at once instead of waiting out BUZZ_PENDING_MS.
   useEffect(() => {
-    const onRejected = () => { buzzSentAtRef.current = 0; phaseMarkedRef.current = false; };
+    const onRejected = () => {
+      buzzSentAtRef.current = 0;
+      phaseMarkedRef.current = false;
+      // Nobody has the buzz, so the question should carry on playing.
+      if (pausedForBuzzRef.current && !buzzerRef.current) {
+        const video = document.getElementById("hls");
+        if (video) video.play().catch(() => {});
+      }
+      pausedForBuzzRef.current = false;
+    };
     // A reconnect gets a new sid, and the server keeps answer audio per sid. Re-open the stream so
     // the recording keeps landing in the training data.
     const onConnect = () => { if (processorRef.current) socket.emit('start_audio_stream', {}); };
