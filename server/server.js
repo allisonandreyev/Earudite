@@ -8,8 +8,10 @@ const dataflowProxy = createProxyMiddleware({
   target: "http://localhost:5110",
   changeOrigin: true,
 	secure: false,
-	  "logLevel": "debug",
-  ws: true,
+	  "logLevel": "warn",
+  // Only the socket proxy takes websocket upgrades. With ws:true here too, every proxy subscribed
+  // to the server's upgrade event and the socket's upgrade was forwarded to all three backends.
+  ws: false,
   pathRewrite: function (path, req) {
     return path.replace("/api/dataflow", "");
   },
@@ -17,18 +19,19 @@ const dataflowProxy = createProxyMiddleware({
 
 const hlsProxy = createProxyMiddleware({
   target: "http://localhost:4440",
-	  "logLevel": "debug",
+	  "logLevel": "warn",
   changeOrigin: true,
 	secure: false,
-  ws: true,
+  ws: false,
   pathRewrite: function (path, req) {
     return path.replace("/api/hls", "");
   },
 });
 
 const socketProxy = createProxyMiddleware({
-  target: "http://localhost:6470",
-    "logLevel": "debug",
+  // The socket server moved to :4000 (start_all.sh); :6470 is the old port and nothing listens there.
+  target: "http://localhost:4000",
+    "logLevel": "warn",
   changeOrigin: true,
 	secure : false,
   ws: true,

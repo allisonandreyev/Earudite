@@ -29,12 +29,16 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 # Exporting them makes the build independent of whether .env is picked up, and the verification
 # step below turns a recurrence into a failed deploy instead of a silently broken site.
 # ---------------------------------------------------------------------------
+# Values already set in the environment win over .env, so a deploy can point the bundle somewhere
+# else (e.g. same-origin /api/... paths for a public tunnel) without editing the tracked .env.
+_PRESET_URLS=$(env | grep '^REACT_APP_PUBLIC_' || true)
 if [ -f "$FRONTEND_DIR/.env" ]; then
   set -a
   # shellcheck disable=SC1091
   . "$FRONTEND_DIR/.env"
   set +a
 fi
+while IFS= read -r _kv; do [ -n "$_kv" ] && export "$_kv"; done <<< "$_PRESET_URLS"
 
 export REACT_APP_PUBLIC_DATAFLOW_URL="${REACT_APP_PUBLIC_DATAFLOW_URL:-http://localhost:5110}"
 export REACT_APP_PUBLIC_SOCKET_URL="${REACT_APP_PUBLIC_SOCKET_URL:-http://localhost:4000}"

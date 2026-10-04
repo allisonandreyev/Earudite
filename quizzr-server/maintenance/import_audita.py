@@ -1,5 +1,8 @@
 """
-Import the AUDITA audio-QA dataset (Pinafore/audio_data) into Earudite's question collections.
+Import the AUDITA audio-QA dataset into Earudite's question collections.
+
+Default source is the cleansed Hugging Face release (TasnimKabir12/audita-audio); the original
+Pinafore/audio_data combined.json is still available with --source pinafore.
 
 Why this exists
 ---------------
@@ -49,6 +52,40 @@ from datetime import datetime, timezone
 import pymongo
 
 COMBINED_JSON_URL = "https://raw.githubusercontent.com/Pinafore/audio_data/main/combined%20(1).json"
+
+# The cleansed release on Hugging Face (the default source since 2026-10-03). Same 9,690 questions,
+# but 4,184 of the 6,460 human-authored answers were cleaned of packet markup and file-name noise —
+# "Terry Wogan_01" -> "Terry Wogan", "_Swan Lake_ [or ...]" -> "Swan Lake [or ...]",
+# "Simply Red - Stars (Clip)" -> "Simply Red - Stars" — which is exactly the noise that made
+# fuzzy answer matching reject correct spoken answers. The raw answer is kept as
+# `original_ground_truth`. Its schema differs from combined.json; adapt_hf_entry() maps it across.
+HF_REPO = "TasnimKabir12/audita-audio"
+HF_JSON_URL = f"https://huggingface.co/datasets/{HF_REPO}/resolve/main/all_combined_9690_unsplit_full_audio_data.json"
+HF_AUDIO_BASE = f"https://huggingface.co/datasets/{HF_REPO}/resolve/main/"
+
+# The human-authored rows still carry the authors' cluster paths. Each cluster directory was
+# uploaded to the repo under a new name with the same layout beneath it. Matching on basename
+# alone is not enough: 1,362 rows share names like "01.mp3" across packet folders.
+HF_PATH_PREFIXES = {
+    "/fs/nexus-scratch/dmku66/quizmasters/": "Our sources/Trivia(quizmasters)/",
+    "/fs/nexus-scratch/dmku66/audio-packets/": "Our sources/Quizbowl/audio-packets/",
+    "/fs/nexus-scratch/dmku66/unsplit_Pavements_I_II_III/": "Our sources/Quizbowl/Pavements/",
+}
+# External rows (OpenAQA, ClothoAQA) are all flat in this folder, with unique basenames.
+HF_EXTERNAL_DIR = "External Sources/"
+
+# HF main_category -> the raw category strings question_categories.py buckets on. Measured against
+# the previous import: each HF category lines up with exactly one raw one.
+HF_CATEGORY_MAP = {
+    "Music Identification": "name",
+    "Media Content": "pop",
+    "Character/Person": "person",
+    "Musical Elements": "element",
+    "Musical Performance": "element",
+    "Cultural/Geographic": "geo",
+    "Sound Identification": "sound",
+    "Other": "sound",
+}
 
 # combined.json's `file_name` values still point at the dataset's original home. The files live in
 # the Pinafore fork now; the paths below it are identical.
@@ -131,6 +168,41 @@ def normalise_audio_url(raw_url: str) -> str:
     )
 
 
+def hf_audio_path(entry: dict) -> str:
+    """Repo-relative path of an HF entry's clip."""
+    raw = (entry.get("file_name") or "").strip()
+    if "dataset" in entry:  # external benchmark row
+        return HF_EXTERNAL_DIR + raw.rsplit("/", 1)[-1]
+    for cluster_prefix, repo_prefix in HF_PATH_PREFIXES.items():
+        if raw.startswith(cluster_prefix):
+            return repo_prefix + raw[len(cluster_prefix):]
+    raise ValueError(f"no repo folder known for {raw!r}")
+
+
+def adapt_hf_entry(entry: dict) -> dict:
+    """
+    Reshape a Hugging Face row into the combined.json shape the rest of this script reads.
+
+    The two halves of the HF file have different schemas: human-authored rows carry
+    main_category/subcategory/original_ground_truth, external rows carry
+    dataset/task/Categories. External rows were all "sound" in the previous import (their
+    `Categories` label is spread evenly over all six and does not describe the clip), so they stay
+    "sound".
+    """
+    external = "dataset" in entry
+    category = "sound" if external else HF_CATEGORY_MAP.get(entry.get("main_category"), "sound")
+    return {
+        "file_name": HF_AUDIO_BASE + urllib.parse.quote(hf_audio_path(entry)),
+        "question": entry.get("question") or "",
+        "answer": entry.get("ground_truth") or "",
+        "category": category,
+        "original_answer": entry.get("original_ground_truth") or "",
+        "source_subcategory": (entry.get("task") if external else entry.get("subcategory")) or "",
+        "source_dataset": entry.get("dataset") or "audita",
+        "source_path": (entry.get("file_name") or "").strip(),
+    }
+
+
 def stable_qb_id(entry: dict) -> int:
     """
     Derive a deterministic 48-bit question ID from the entry's full content.
@@ -168,13 +240,19 @@ def build_vtt(question_text: str) -> str:
     return f"WEBVTT\n\n00:00.500 --> {end}\n<v Speaker 0>{safe}\n"
 
 
-def load_entries(path: str = None) -> list:
+def load_entries(path: str = None, source: str = "hf") -> list:
     if path:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    print(f"Downloading {COMBINED_JSON_URL} ...")
-    with urllib.request.urlopen(COMBINED_JSON_URL, timeout=120) as f:
-        return json.loads(f.read())
+            raw = json.load(f)
+    else:
+        url = HF_JSON_URL if source == "hf" else COMBINED_JSON_URL
+        print(f"Downloading {url} ...")
+        with urllib.request.urlopen(url, timeout=120) as f:
+            raw = json.loads(f.read())
+    # Detect the shape rather than trusting the flag, so --json works with either file.
+    if raw and "ground_truth" in raw[0]:
+        return [adapt_hf_entry(e) for e in raw]
+    return raw
 
 
 def build_documents(entries: list):
@@ -230,7 +308,12 @@ def build_documents(entries: list):
             "recDifficulty": DIFFICULTY_SCORES[difficulty],
             "dataset": "audita",
             "source": "audita",
-            "sourceUrl": raw_url,
+            "sourceUrl": entry.get("source_path") or raw_url,
+            # HF-only provenance: the pre-cleansing answer, the authors' finer label, and which
+            # benchmark an external row came from. Empty for the old combined.json source.
+            "originalAnswer": normalise_text(entry.get("original_answer") or ""),
+            "sourceSubcategory": entry.get("source_subcategory") or "",
+            "sourceDataset": entry.get("source_dataset") or "audita",
             "tokenizations": [[0, len(question_text)]],
             "recordings": [{"id": aid, "recType": "normal"}],
             "importedAt": now,
@@ -239,7 +322,8 @@ def build_documents(entries: list):
         audios.append({
             "_id": aid,
             "qb_id": qb_id,
-            "version": "audita-1.0.0",
+            # 2.x = the cleansed Hugging Face release, 1.x = the original combined.json.
+            "version": "audita-2.0.0" if "source_path" in entry else "audita-1.0.0",
             "recType": "normal",
             "source": "audita",
             "audioUrl": audio_url,
@@ -296,7 +380,10 @@ def backup_collections(db, out_dir: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--json", help="Path to a local combined.json (defaults to downloading it)")
+    parser.add_argument("--json", help="Path to a local dataset JSON, either shape (defaults to downloading)")
+    parser.add_argument("--source", choices=("hf", "pinafore"), default="hf",
+                        help="Which release to download: the cleansed Hugging Face one (default) or "
+                             "the original Pinafore/audio_data combined.json")
     parser.add_argument("--dry-run", action="store_true", help="Build and summarise documents without writing")
     parser.add_argument("--replace", action="store_true", help="Wipe the question collections and load AUDITA")
     parser.add_argument("--verify-audio", type=int, metavar="N", default=0,
@@ -308,7 +395,7 @@ def main() -> int:
     if not args.dry_run and not args.replace:
         parser.error("pass --dry-run to preview, or --replace to actually load")
 
-    entries = load_entries(args.json)
+    entries = load_entries(args.json, args.source)
     print(f"Loaded {len(entries)} raw AUDITA entries")
 
     questions, audios, duplicates, skipped = build_documents(entries)
