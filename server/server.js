@@ -30,7 +30,8 @@ const hlsProxy = createProxyMiddleware({
 
 const socketProxy = createProxyMiddleware({
   // The socket server moved to :4000 (start_all.sh); :6470 is the old port and nothing listens there.
-  target: "http://localhost:4000",
+  // SOCKET_PORT overrides it when something else already holds :4000.
+  target: `http://localhost:${process.env.SOCKET_PORT || 4000}`,
     "logLevel": "warn",
   changeOrigin: true,
 	secure : false,

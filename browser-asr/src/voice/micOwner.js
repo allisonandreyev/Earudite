@@ -26,6 +26,60 @@ try {
   // no Web Speech support in this browser — nothing to configure
 }
 
+// The recognizer hears the room, and in a game the room includes the question clip playing from
+// the speakers. Left to open the microphone itself, Web Speech gets no echo cancellation, so clip
+// speech was transcribed as if the player had said it — and a clip word that sounds like "buzz"
+// buzzed them in. Chrome's echo canceller removes what the page itself is playing, but only from a
+// getUserMedia stream that asks for it. So capture one here and hand its track to the recognizer:
+// recognition.start(track) is supported in current Chrome. Browsers that don't support the
+// argument ignore it (extra WebIDL arguments are dropped) and keep using their own capture, which
+// is no worse than before.
+const PROCESSED_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+let processedStream = null;
+let processedRequest = null;
+
+function processedTrack() {
+  const track = processedStream && processedStream.getAudioTracks()[0];
+  return track && track.readyState === "live" ? track : null;
+}
+
+function requestProcessedStream() {
+  if (processedTrack()) return Promise.resolve();
+  if (!processedRequest) {
+    processedRequest = navigator.mediaDevices.getUserMedia({ audio: PROCESSED_AUDIO })
+      .then((stream) => {
+        processedStream = stream;
+        // The OS or the user can end the track (device unplugged, permission revoked). Fall back
+        // to the recognizer's own capture rather than feeding it a dead track.
+        stream.getAudioTracks().forEach((t) => t.addEventListener("ended", () => { processedStream = null; }));
+      })
+      .catch(() => { processedStream = null; })
+      .finally(() => { processedRequest = null; });
+  }
+  return processedRequest;
+}
+
+function releaseProcessedStream() {
+  if (processedStream) processedStream.getTracks().forEach((t) => t.stop());
+  processedStream = null;
+}
+
+// react-speech-recognition calls recognition.start() itself, both on startListening() and on
+// every automatic restart in continuous mode, so the track is passed in at that one call site.
+try {
+  const recognition = SpeechRecognition.getRecognition();
+  if (recognition && !recognition.__earuditeTrackStart) {
+    const nativeStart = recognition.start.bind(recognition);
+    recognition.start = (...args) => {
+      const track = processedTrack();
+      return track && args.length === 0 ? nativeStart(track) : nativeStart(...args);
+    };
+    recognition.__earuditeTrackStart = true;
+  }
+} catch (e) {
+  // no Web Speech support in this browser — nothing to patch
+}
+
 const claims = new Set();
 const watchers = new Set();
 let listening = false;
@@ -35,13 +89,24 @@ function apply() {
   const want = claims.size > 0;
   if (want === listening) { notify(); return; }
   listening = want;
-  try {
-    if (want) SpeechRecognition.startListening({ continuous: true, language: RECOGNITION_LANGUAGE });
-    else SpeechRecognition.abortListening();
-  } catch (e) {
-    // A recognizer that refuses to start is reported through the status, not thrown at the caller.
-    listening = false;
+  if (!want) {
+    try { SpeechRecognition.abortListening(); } catch (e) { /* nothing to stop */ }
+    releaseProcessedStream();
+    notify();
+    return;
   }
+  // Get the echo-cancelled track before the first start, so even the first words are clean.
+  // Without mic permission this resolves with no track and the recognizer uses its own capture.
+  requestProcessedStream().then(() => {
+    if (!listening) { releaseProcessedStream(); return; }  // released while we waited
+    try {
+      SpeechRecognition.startListening({ continuous: true, language: RECOGNITION_LANGUAGE });
+    } catch (e) {
+      // A recognizer that refuses to start is reported through the status, not thrown at the caller.
+      listening = false;
+    }
+    notify();
+  });
   notify();
 }
 
@@ -63,7 +128,7 @@ export function releaseMic(owner) { claims.delete(owner); sync(); }
 
 // For the debug overlay: who wants the mic, and is it actually running.
 export function micStatus() {
-  return { owners: Array.from(claims), listening: listening };
+  return { owners: Array.from(claims), listening: listening, echoCancelled: !!processedTrack() };
 }
 
 export function watchMic(fn) {

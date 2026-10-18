@@ -4,7 +4,7 @@
 set -uo pipefail
 
 # Parallel arrays instead of an associative array — macOS ships bash 3.2, which lacks `declare -A`.
-PORTS=(5110 4440 4000 6800 3000)
+PORTS=(5110 4440 "${SOCKET_PORT:-4000}" 6800 3000)
 NAMES=("quizzr-server" "hls" "quizzr-socket-server" "server" "browser-asr")
 
 for i in "${!PORTS[@]}"; do

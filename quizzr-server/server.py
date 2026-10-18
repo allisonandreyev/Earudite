@@ -43,6 +43,7 @@ from mail_lib import Mailer
 import question_categories
 import rec_processing
 import soundex
+import bert_matcher
 import sv_util
 from sv_api import QuizzrAPISpec
 from tpm import QuizzrTPM
@@ -105,6 +106,14 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         # Fallback phonetic (Soundex) comparison for answers that sound right but are
         # spelled/transcribed wrong. Set MIN_ANSWER_PHONETIC_SIMILARITY to None to disable.
         "MIN_ANSWER_PHONETIC_SIMILARITY": 90,
+        # BERT answer judging (bert_matcher.judge): an answer counts when it names every part the
+        # question asks for (the work for "Name the piece", both for "song and who made it") AND
+        # the model scores it equivalent at MIN_ANSWER_BERT_SCORE (0-1) or above. Raise the score
+        # to be stricter. MIN_ANSWER_BERT_SIMILARITY is the string match a person's name needs.
+        # The two thresholds above are only used while the model loads or if it fails to. Set
+        # MIN_ANSWER_BERT_SCORE to None to disable the model entirely.
+        "MIN_ANSWER_BERT_SIMILARITY": 90,
+        "MIN_ANSWER_BERT_SCORE": 0.5,
         "PROC_CONFIG": {
             "checkUnk": True,
             "unkToken": "<unk>",
@@ -252,6 +261,11 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
     app_attributes["qwPid"] = qw_process.pid
     app.logger.debug(f"qwPid = {app_attributes['qwPid']}")
     app.logger.info("Started pre-screening program")
+
+    # Loaded only after the fork above: torch's thread pools don't survive fork(), so loading
+    # it first could hang the pre-screening process.
+    if app_conf.get("MIN_ANSWER_BERT_SCORE") is not None:
+        bert_matcher.start_loading(app.logger.getChild("bert_matcher"))
 
     # System to send email addresses to new users.
     def _initialize_mailer():
@@ -732,7 +746,8 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
 
     @app.route("/answer", methods=["GET"])
     def check_answer():
-        """Check if an answer is correct using approximate string matching."""
+        """Check if an answer is correct with the BERT answer matcher, or approximate string
+        matching while the model is unavailable."""
         qid = request.args.get("qid")
         user_answer = request.args.get("a")
 
@@ -776,6 +791,15 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         if soundex.tokenize(correct_answer) and not soundex.tokenize(user_answer):
             _debug_variable("answer_rejected", "stopwords_only")
             return {"correct": False}
+
+        min_bert = app.config.get("MIN_ANSWER_BERT_SCORE")
+        if min_bert is not None:
+            verdict = bert_matcher.judge(user_answer, correct_answer, question.get("transcript") or "",
+                                         app.config["MIN_ANSWER_BERT_SIMILARITY"], min_bert)
+            if verdict is not None:
+                app.logger.info(f"Answer judged by BERT: qid={qid} {user_answer!r} -> {verdict}")
+                return {"correct": verdict["correct"]}
+            app.logger.warning("Answer matcher model not ready; judging with string matching")
 
         answer_similarity = fuzz.token_set_ratio(user_answer, correct_answer)
         _debug_variable("answer_similarity", answer_similarity)

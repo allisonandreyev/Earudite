@@ -26,6 +26,11 @@ if [ -z "$PY_BIN" ] || [ ! -x "$PY_BIN/python3.11" ]; then
 fi
 echo "Using python from: $PY_BIN"
 
+# ffmpeg (the HLS server transcodes every clip with it) and node/npm live in Homebrew's bin. A
+# shell that hasn't loaded the user's profile lacks it, and the HLS server then silently serves
+# generated silence for every question instead of failing.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 if [ ! -f "$ROOT_DIR/.env.local" ]; then
   echo "ERROR: $ROOT_DIR/.env.local not found. Create it with CONNECTION_STRING and FIREBASE_KEY_PATH." >&2
   exit 1
@@ -87,16 +92,19 @@ if check_port_free 4440 "hls"; then
   wait_for_port 4440 "hls"
 fi
 
-echo "=== 3/5 quizzr-socket-server (real-time game, :4000) ==="
-if check_port_free 4000 "quizzr-socket-server"; then
+# SOCKET_PORT moves the socket server off :4000 when something else holds it; the :6800 proxy
+# (server/server.js) reads the same variable.
+export SOCKET_PORT="${SOCKET_PORT:-4000}"
+echo "=== 3/5 quizzr-socket-server (real-time game, :$SOCKET_PORT) ==="
+if check_port_free "$SOCKET_PORT" "quizzr-socket-server"; then
   ( cd "$ROOT_DIR/quizzr-socket-server" && \
     nohup "$PY_BIN/python3.11" main.py \
-      --socketport 4000 \
+      --socketport "$SOCKET_PORT" \
       --secretpath "$FIREBASE_KEY_PATH" \
       --hlsurl "http://localhost:4440" \
       --backendurl "http://localhost:5110" \
       --whispermodel base >> /tmp/socket_server.log 2>&1 & disown )
-  wait_for_port 4000 "quizzr-socket-server"
+  wait_for_port "$SOCKET_PORT" "quizzr-socket-server"
 fi
 
 echo "=== 4/5 server (proxy + frontend host, :6800) ==="
