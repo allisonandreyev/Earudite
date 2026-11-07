@@ -24,3 +24,7 @@ npm-debug.log*
 backups/
 # Pre-import snapshots written by quizzr-server/maintenance/import_audita.py
 quizzr-server/question_backups/
+
+# Frontend bundle: ./deploy.sh builds browser-asr and copies it here, every deploy
+server/build/
+server/build.prev/

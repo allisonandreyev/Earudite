@@ -681,6 +681,53 @@ function AnswerBox(props) {
     return () => clearInterval(t);
   }, [speechMode]);
 
+
+  // Buzz from a headset button. Earbuds and headphones send their play/pause (and, on some
+  // headsets and browsers, mute) presses to the page as Media Session actions. The question clip
+  // is a <video>, so this page is the active media session while a game runs. Every one of these
+  // actions buzzes (or submits, see onPress); none of them pauses or resumes the clip, which also stops a stray press from
+  // pausing the question for this player. The press is ignored when someone already holds the
+  // buzz, the same as Space. Handlers go through actionRef so they always call the current buzzin.
+  useEffect(() => {
+    const ms = typeof navigator !== 'undefined' ? navigator.mediaSession : null;
+    // First press buzzes. A press while this player holds the buzz submits what is in the answer
+    // box, so a whole turn works hands-free: press, speak, press. An empty box is not submitted, so
+    // a double press right after buzzing cannot throw the turn away before anything was said.
+    const onPress = () => {
+      const a = actionRef.current;
+      const mine = buzzerRef.current && buzzerRef.current === usernameRef.current;
+      if (mine) {
+        if ((answerRef.current || '').trim() && a.submit1) a.submit1();
+      } else if (a.buzzin) {
+        a.buzzin();
+      }
+    };
+    const actions = ['play', 'pause', 'togglemicrophone'];
+    if (ms) {
+      for (const a of actions) {
+        // Browsers throw on actions they do not know (togglemicrophone is Chromium-only).
+        try { ms.setActionHandler(a, onPress); } catch (e) { /* unsupported action */ }
+      }
+    }
+    // Media keys on a keyboard, or a headset, reach the page as key events when no media session
+    // claims them.
+    const onKey = (e) => {
+      if (e.key === 'MediaPlayPause' || e.key === 'MediaPlay' || e.key === 'MediaPause') {
+        e.preventDefault();
+        onPress();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (ms) {
+        for (const a of actions) {
+          try { ms.setActionHandler(a, null); } catch (e) { /* unsupported action */ }
+        }
+      }
+    };
+  }, []);
+
   useKeyPress("Enter", submit1, [props.answer], true);
   useKeyPress(" ", buzzin, [], document.activeElement !== textAnswer.current);
 

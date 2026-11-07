@@ -391,17 +391,8 @@ function Game() {
     }
   );
     
-  navigator.mediaSession.setActionHandler("play", async function () {
-    // console.log('> User clicked "Play" icon.');
-    // await video.play();
-    // Do something more than just playing video...
-  });
-
-  navigator.mediaSession.setActionHandler("pause", function () {
-    // console.log('> User clicked "Pause" icon.');
-    // video.pause();
-    // Do something more than just pausing video...
-  });
+  // Headset / media-key handlers (play, pause, mute) are registered in AnswerBox, where they buzz.
+  // They used to be set to no-ops here during render, ~10x a second, which overwrote them.
 
   const authtoken = useRecoilValue(AUTHTOKEN);
   const [gameScreen, setGameScreen] = useState("ingame");
