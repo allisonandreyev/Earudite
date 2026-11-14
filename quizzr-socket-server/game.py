@@ -226,6 +226,10 @@ class Game:
             socketio.emit("startgamefailed", to=self.gamecode)
             socketio.emit("alert", ["error", "Starting game failed"], to=self.gamecode)
 
+    def _reader(self, question_idx):
+        """Who read question `question_idx` aloud ("human" / "tts"), or None if nobody did."""
+        return self.readers[question_idx] if question_idx < len(self.readers) else None
+
     # returns the current game state
     # round #, question #, question time remaining, buzz time remaining, gap time remaining
     def gamestate(self):
@@ -246,9 +250,11 @@ class Game:
                         "rid": self.hls_rids[question_idx],
                         "token": self.hls_tokens[question_idx],
                         "classifiable": False,
-                        # Read-aloud modes hide the prompt text; the reveal still shows the answer.
-                        "show_text": self.question_mode == "text",
-                        "reader": self.readers[question_idx] if question_idx < len(self.readers) else None,
+                        # Read-aloud modes hide the prompt text, but only when a reading was actually
+                        # made: if the voice failed (e.g. no `say` on a non-Mac server) the text is
+                        # the only way left to get the question.
+                        "show_text": self.question_mode == "text" or not self._reader(question_idx),
+                        "reader": self._reader(question_idx),
                         #     AudioClassifier.is_predictable(
                         #     self.answering_ids[self.round - 1][self.question - 1]
                         # ),

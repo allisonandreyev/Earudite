@@ -9,7 +9,9 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import uuid
+import wave
 
 import pymongo
 import requests
@@ -229,11 +231,50 @@ def reading_text(question_text: str) -> str:
     return text
 
 
+# Computer voice: Piper (https://github.com/rhasspy/piper), a free neural TTS engine that runs
+# locally on Linux, Windows and macOS, so readings sound the same wherever this server is hosted.
+# Voice model: hls/voices/<name>.onnx (+ .onnx.json), fetched with
+#   python -m piper.download_voices en_US-lessac-medium --download-dir hls/voices
+# The model files are gitignored (63 MB). PIPER_VOICE overrides the path.
+PIPER_VOICE_PATH = os.environ.get(
+    "PIPER_VOICE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices", "en_US-lessac-medium.onnx"),
+)
+_piper_voice = None
+_piper_failed = False
+# Flask serves threaded; one loaded voice is shared, so synthesis is serialised.
+_piper_lock = threading.Lock()
+
+
+def _get_piper_voice():
+    """Load the Piper voice once. None if piper-tts or the model is missing."""
+    global _piper_voice, _piper_failed
+    if _piper_voice is None and not _piper_failed:
+        try:
+            from piper import PiperVoice
+            _piper_voice = PiperVoice.load(PIPER_VOICE_PATH)
+            print(f"[HLS] Piper voice loaded: {PIPER_VOICE_PATH}")
+        except Exception as e:
+            _piper_failed = True
+            print(f"[HLS] WARNING: Piper unavailable ({e}); falling back to macOS `say` if present")
+    return _piper_voice
+
+
 def make_tts_reading(text: str, output_dir: str) -> str | None:
-    """Speak `text` with the macOS system voice. This stack runs on a Mac, so `say` is always
-    there; anywhere else this returns None and the question plays without a reading."""
+    """Speak `text` with Piper, or with macOS `say` if Piper can't load. None if neither works,
+    in which case the question plays without a reading and its text is shown instead."""
     if not text:
         return None
+    voice = _get_piper_voice()
+    if voice is not None:
+        path = os.path.join(output_dir, "reading_tts.wav")
+        try:
+            with _piper_lock, wave.open(path, "wb") as wf:
+                voice.synthesize_wav(text, wf)
+            if os.path.getsize(path) > 44:  # more than a bare WAV header
+                return path
+        except Exception as e:
+            print(f"[HLS] Piper reading failed: {e}")
     path = os.path.join(output_dir, "reading_tts.aiff")
     try:
         subprocess.run(["say", "-o", path, text], check=True, capture_output=True, timeout=30)

@@ -28,3 +28,6 @@ quizzr-server/question_backups/
 # Frontend bundle: ./deploy.sh builds browser-asr and copies it here, every deploy
 server/build/
 server/build.prev/
+
+# Piper voice models for the HLS server (63 MB each); see hls/hls_server.py PIPER_VOICE_PATH
+hls/voices/
