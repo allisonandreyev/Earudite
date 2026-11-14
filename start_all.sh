@@ -86,6 +86,10 @@ fi
 
 echo "=== 2/5 hls (audio streaming, :4440) ==="
 if check_port_free 4440 "hls"; then
+  # Computer voice for the "Read by Computer" mode: install Piper + its voice if missing and test
+  # it. A failure is reported but does not stop the stack — those questions then show their text.
+  "$ROOT_DIR/hls/setup_tts.sh" "$PY_BIN/python3.11" \
+    || echo "WARN: computer voice unavailable — see the TTS SETUP FAILED message above" >&2
   ( cd "$ROOT_DIR/hls" && \
     CONNECTION_STRING="$CONNECTION_STRING" nohup "$PY_BIN/python3.11" \
       hls_server.py >> /tmp/hls_server.log 2>&1 & disown )

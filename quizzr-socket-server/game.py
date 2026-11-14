@@ -39,6 +39,13 @@ HTTP_TIMEOUT = 5
 ANSWER_HTTP_TIMEOUT = ANSWER_GRACE_SECONDS - 2
 # Game setup fetches a VTT per question, so it gets more room than a single in-game call.
 SETUP_HTTP_TIMEOUT = 15
+# The HLS server prepares only question 1 before the game starts; every later stream (clip
+# download, transcode, spoken reading) is prepared in the background while earlier questions and
+# the cooldown gaps play. During each gap the next stream is polled at most this often...
+STREAM_POLL_SECONDS = 1.0
+# ...and if it is still not ready when the gap ends, the gap is held this long at most before the
+# question starts anyway (it then simply plays once its files appear).
+MAX_STREAM_WAIT_SECONDS = 60
 
 
 class Game:
@@ -64,6 +71,8 @@ class Game:
         # server puts a spoken reading of the prompt in front of each clip.
         self.question_mode = lobby.settings.get("question_mode", "text")
         self.readers = []  # per question: who read it aloud ("human" / "tts"), or None
+        self.stream_ready = []  # per question: HLS stream prepared and its lead applied
+        self._last_stream_poll = 0.0
 
         # HLS Tokens
         self.socketio = socketio
@@ -141,13 +150,18 @@ class Game:
                 )
                 print(hls_response.json())
                 self.readers = [None] * len(self.questions)
+                self.stream_ready = [False] * len(self.questions)
                 for pair in hls_response.json()["streams"]:
                     idx = [x[0] for x in self.questions].index(pair["qid"])
                     self.hls_rids[idx] = pair["rid"]
-                    # The reading plays before the clip inside the same stream, so the question
-                    # clock has to run that much longer or the reading eats the clip's time.
-                    self.questions[idx][2] += float(pair.get("lead") or 0)
-                    self.readers[idx] = pair.get("reader")
+                    # Only question 1 is prepared by now; the rest report ready=False and are
+                    # picked up by _poll_stream() during the gap before each of them.
+                    if pair.get("ready", True):
+                        # The reading plays before the clip inside the same stream, so the question
+                        # clock has to run that much longer or the reading eats the clip's time.
+                        self.questions[idx][2] += float(pair.get("lead") or 0)
+                        self.readers[idx] = pair.get("reader")
+                        self.stream_ready[idx] = True
             except Exception as e:
                 print(e)
                 self.good_game = False
@@ -226,6 +240,35 @@ class Game:
             socketio.emit("startgamefailed", to=self.gamecode)
             socketio.emit("alert", ["error", "Starting game failed"], to=self.gamecode)
 
+    def _stream_is_ready(self, question_idx):
+        return question_idx < len(self.stream_ready) and self.stream_ready[question_idx]
+
+    def _poll_stream(self, question_idx, force=False):
+        """Unlock question `question_idx`'s stream and, once the HLS server reports it prepared,
+        add its reading to that question's clock. Rate-limited: it runs inside the loop that
+        drives every game, and the HLS call returns immediately rather than waiting."""
+        if question_idx >= len(self.hls_rids):
+            return
+        now = time.time()
+        if not force and now - self._last_stream_poll < STREAM_POLL_SECONDS:
+            return
+        self._last_stream_poll = now
+        try:
+            resp = requests.post(
+                os.environ.get("HLS_URL") + "/api/unlock",
+                data={"handshake": os.environ.get("HLS_HANDSHAKE"), "rid": self.hls_rids[question_idx]},
+                timeout=HTTP_TIMEOUT,
+            ).json()
+        except Exception as e:
+            print(f"Failed to unlock question {question_idx + 1}: {e}")
+            return
+        self.hls_tokens[question_idx] = resp["token"]
+        if resp.get("ready", True) and not self._stream_is_ready(question_idx):
+            r, q = divmod(question_idx, self.questions_num)
+            self.rounds[r][q] += float(resp.get("lead") or 0)
+            self.readers[question_idx] = resp.get("reader")
+            self.stream_ready[question_idx] = True
+
     def _reader(self, question_idx):
         """Who read question `question_idx` aloud ("human" / "tts"), or None if nobody did."""
         return self.readers[question_idx] if question_idx < len(self.readers) else None
@@ -236,11 +279,15 @@ class Game:
         if not self.active_game:  # game is over
             return [self.active_game, 0, 0, 0, 0, 0, 0, self.points, [], ""]
         if self.active_gap[0]:  # between questions
-            # if gap time is over, move to question
-            if self.get_gap_time() < 0:
-                question_idx = (
-                    ((self.round - 1) * self.questions_num) + self.question - 1
-                )
+            next_idx = ((self.round - 1) * self.questions_num) + self.question - 1
+            # The next question's stream is being prepared in the background during this gap.
+            if not self._stream_is_ready(next_idx):
+                self._poll_stream(next_idx)
+            # if gap time is over, move to question — unless its stream is still being prepared,
+            # in which case hold the gap (bounded) rather than start a question with no audio.
+            held_too_long = self.get_gap_time() < -MAX_STREAM_WAIT_SECONDS
+            if self.get_gap_time() < 0 and (self._stream_is_ready(next_idx) or held_too_long):
+                question_idx = next_idx
                 self.prev_answers = [] # clear previous answers
                 self.current_answer_text = ""  # reveal belongs to the question that just ended
 
@@ -340,18 +387,7 @@ class Game:
                     question_idx = (
                             ((self.round - 1) * self.questions_num) + self.question - 1
                     )
-                    try:
-                        unlock_response = requests.post(
-                            os.environ.get("HLS_URL") + "/api/unlock",
-                            data={
-                                "handshake": os.environ.get("HLS_HANDSHAKE"),
-                                "rid": self.hls_rids[question_idx],
-                            },
-                            timeout=HTTP_TIMEOUT,
-                        ).json()
-                        self.hls_tokens[question_idx] = unlock_response["token"]
-                    except Exception as e:
-                        print(f"Failed to unlock next question: {e}")
+                    self._poll_stream(question_idx, force=True)
                     
 
         return [
@@ -360,7 +396,7 @@ class Game:
             self.question,
             self.get_question_time(),
             self.get_buzz_time(),
-            self.get_gap_time(),
+            max(0.0, self.get_gap_time()),  # stays at 0 while a held gap waits for its stream
             self.buzzer,
             self.points,
             self.prev_answers,

@@ -13,9 +13,9 @@ import {
 
 // How questions are presented. Mirrors lobby.QUESTION_MODES on the socket server.
 export const QUESTION_MODES = [
-    { id: 'text', label: 'Audio + text', help: 'The clip plays with the question shown on screen.' },
-    { id: 'human', label: 'Read by a person', help: 'A person reads the question aloud, then the clip plays. Only questions someone has recorded are used.' },
-    { id: 'tts', label: 'Read by computer', help: 'A computer voice reads the question aloud, then the clip plays.' },
+    { id: 'text', label: 'Audio + Text', help: 'The clip plays with the question shown on screen.' },
+    { id: 'human', label: 'Read by a Person', help: 'A person reads the question aloud, then the clip plays. Only questions someone has recorded are used.' },
+    { id: 'tts', label: 'Read by Computer', help: 'A computer voice reads the question aloud, then the clip plays.' },
 ];
 
 // How many questions have a person's recording. "Read by a person" plays only those, so the option

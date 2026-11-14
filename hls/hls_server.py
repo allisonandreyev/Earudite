@@ -233,30 +233,30 @@ def reading_text(question_text: str) -> str:
 
 # Computer voice: Piper (https://github.com/rhasspy/piper), a free neural TTS engine that runs
 # locally on Linux, Windows and macOS, so readings sound the same wherever this server is hosted.
-# Voice model: hls/voices/<name>.onnx (+ .onnx.json), fetched with
-#   python -m piper.download_voices en_US-lessac-medium --download-dir hls/voices
-# The model files are gitignored (63 MB). PIPER_VOICE overrides the path.
-PIPER_VOICE_PATH = os.environ.get(
-    "PIPER_VOICE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices", "en_US-lessac-medium.onnx"),
-)
+# piper_voice.py loads it (downloading the voice model on first use) and works around eSpeak's
+# path-length limit; setup_tts.sh installs and tests it, and start_all.sh runs that script.
+import piper_voice
+
 _piper_voice = None
-_piper_failed = False
+_piper_status = {"ok": False, "detail": "not loaded yet"}
 # Flask serves threaded; one loaded voice is shared, so synthesis is serialised.
 _piper_lock = threading.Lock()
+_piper_load_lock = threading.Lock()
 
 
 def _get_piper_voice():
-    """Load the Piper voice once. None if piper-tts or the model is missing."""
-    global _piper_voice, _piper_failed
-    if _piper_voice is None and not _piper_failed:
-        try:
-            from piper import PiperVoice
-            _piper_voice = PiperVoice.load(PIPER_VOICE_PATH)
-            print(f"[HLS] Piper voice loaded: {PIPER_VOICE_PATH}")
-        except Exception as e:
-            _piper_failed = True
-            print(f"[HLS] WARNING: Piper unavailable ({e}); falling back to macOS `say` if present")
+    """Load the Piper voice once. None (and _piper_status says why) if it can't be loaded."""
+    global _piper_voice
+    with _piper_load_lock:
+        if _piper_voice is None and _piper_status["detail"] == "not loaded yet":
+            try:
+                _piper_voice = piper_voice.load_voice()
+                _piper_status.update(ok=True, detail=f"Piper voice {piper_voice.model_path().name}")
+                print(f"[HLS] Piper voice loaded: {piper_voice.model_path()}", flush=True)
+            except Exception as e:
+                _piper_status.update(ok=False, detail=f"Piper unavailable: {e}")
+                print(f"[HLS] WARNING: Piper unavailable ({e}); falling back to macOS `say` if present",
+                      flush=True)
     return _piper_voice
 
 
@@ -480,41 +480,73 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None,
 
 # --- API endpoints ---
 
+def _prepare_stream(rid: str) -> None:
+    """Download + transcode (+ reading) for one stream, then mark it ready. Never raises."""
+    st = streams[rid]
+    info = {"lead": 0.0, "reader": None}
+    try:
+        info = download_and_transcode(st["qid"], st["path"], qb_id=st["qb_id"], mode=st["mode"]) or info
+    except Exception as e:
+        print(f"[HLS] Fatal error for {st['qid']}: {e}")
+    st["info"] = info
+    st["ready"].set()
+
+
+def _prepare_in_background(rids: list) -> None:
+    # In play order, one at a time: question 2 is ready long before question 1 ends, and only one
+    # clip download + transcode runs per game at once.
+    for rid in rids:
+        _prepare_stream(rid)
+
+
+def _stream_status(rid: str) -> dict:
+    st = streams[rid]
+    ready = st["ready"].is_set()
+    return {"ready": ready, **(st["info"] if ready else {"lead": 0.0, "reader": None})}
+
+
 @app.route("/api/batch", methods=["POST"])
 def batch():
+    """Register a game's streams. Only the FIRST question is prepared before this returns; the
+    rest are prepared in the background while earlier questions and the gaps between them play,
+    so a game starts in the time one clip takes instead of all of them. The game server polls
+    /api/unlock during each gap and waits for a stream that is not ready yet."""
     if request.form.get("handshake") != HANDSHAKE:
         abort(403)
 
     qids = request.form.getlist("qids")
     raw_qb_ids = request.form.getlist("qb_ids")
     mode = request.form.get("mode", "text")
-    result_streams = []
+    rids = []
     for i, qid in enumerate(qids):
         qb_id = int(raw_qb_ids[i]) if i < len(raw_qb_ids) and raw_qb_ids[i].isdigit() else None
         rid = str(uuid.uuid4())
         stream_dir = os.path.join(STREAM_DIR, rid)
         os.makedirs(stream_dir, exist_ok=True)
-        info = {"lead": 0.0, "reader": None}
-        try:
-            info = download_and_transcode(qid, stream_dir, qb_id=qb_id, mode=mode) or info
-        except Exception as e:
-            print(f"[HLS] Fatal error for {qid}: {e}")
-        streams[rid] = {"qid": qid, "path": stream_dir, "token": None}
-        result_streams.append({"qid": qid, "rid": rid, **info})
+        streams[rid] = {"qid": qid, "qb_id": qb_id, "mode": mode, "path": stream_dir, "token": None,
+                        "ready": threading.Event(), "info": {"lead": 0.0, "reader": None}}
+        rids.append(rid)
 
-    return jsonify({"streams": result_streams})
+    if rids:
+        _prepare_stream(rids[0])
+        if len(rids) > 1:
+            threading.Thread(target=_prepare_in_background, args=(rids[1:],), daemon=True).start()
+
+    return jsonify({"streams": [{"qid": streams[r]["qid"], "rid": r, **_stream_status(r)} for r in rids]})
 
 
 @app.route("/api/unlock", methods=["POST"])
 def unlock():
+    """Issue the playback token for a stream and report whether it is prepared yet. Never waits:
+    the game server calls this from the loop that drives every game, and polls again if not ready."""
     if request.form.get("handshake") != HANDSHAKE:
         abort(403)
     rid = request.form.get("rid")
     if rid not in streams:
         abort(404)
-    token = str(uuid.uuid4())
-    streams[rid]["token"] = token
-    return jsonify({"token": token})
+    if not streams[rid]["token"]:
+        streams[rid]["token"] = str(uuid.uuid4())
+    return jsonify({"token": streams[rid]["token"], **_stream_status(rid)})
 
 
 def _serve(rid: str, filename: str):
@@ -543,6 +575,16 @@ def serve_manifest(rid):
 def serve_file(rid, filename):
     return _serve(rid, filename)
 
+
+@app.route("/api/health")
+def health():
+    """Quick check after a deploy: is the computer voice working on this server?"""
+    return jsonify({"tts": _piper_status})
+
+
+# Load the voice now, in the background, so a missing model is downloaded (and any problem logged)
+# at startup rather than in the middle of the first read-aloud game.
+threading.Thread(target=_get_piper_voice, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, threaded=True)
