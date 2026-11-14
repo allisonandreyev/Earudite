@@ -41,11 +41,16 @@ streams: dict = {}
 MONGO_URI = os.environ.get("CONNECTION_STRING", "")
 _audio_col = None
 _rec_questions_col = None
+_audio_blobs = None
 try:
     _mongo = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     _db = _mongo["QuizzrDatabase"]
     _audio_col = _db["Audio"]
     _rec_questions_col = _db["RecordedQuestions"]
+    # Human recordings uploaded from the Record page live here, keyed by their Audio doc's _id
+    # (quizzr-server/tpm.py stores them under the same collection name).
+    import gridfs
+    _audio_blobs = gridfs.GridFS(_db, collection="AudioBlobs")
     _audio_col.find_one({})
     print("[HLS] MongoDB connected")
 except Exception as e:
@@ -165,10 +170,21 @@ def build_subtitle_m3u8(duration: float) -> str:
     )
 
 
-def transcode_to_hls(audio_input: str, output_dir: str) -> None:
+def transcode_to_hls(audio_input: str, output_dir: str, lead_input: str | None = None) -> None:
+    if lead_input:
+        # Reading first, a short pause, then the clip, as one continuous stream. Both inputs are
+        # resampled to one format first; concat refuses inputs whose rate or layout differ.
+        fmt = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
+        cmd = [
+            "ffmpeg", "-y", "-i", lead_input, "-i", audio_input,
+            "-filter_complex",
+            f"[0:a]{fmt},apad=pad_dur={READING_GAP_SECONDS}[r];[1:a]{fmt}[c];[r][c]concat=n=2:v=0:a=1[out]",
+            "-map", "[out]",
+        ]
+    else:
+        cmd = ["ffmpeg", "-y", "-i", audio_input]
     subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", audio_input,
+        cmd + [
             "-codec:a", "aac", "-b:a", "128k",
             "-hls_time", "10", "-hls_list_size", "0",
             "-hls_segment_filename", os.path.join(output_dir, "audio%03d.ts"),
@@ -194,7 +210,84 @@ def make_silent_hls(duration: float, output_dir: str) -> None:
 
 
 
-def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) -> None:
+# Silence between the end of a reading and the start of the clip.
+READING_GAP_SECONDS = 0.6
+# A reading longer than this is cut off: some sound-captioning prompts carry a whole answer-format
+# example that nobody wants read to them before every clip.
+MAX_READING_CHARS = 300
+
+
+def reading_text(question_text: str) -> str:
+    """The part of a prompt worth saying aloud: no markup or bracketed examples, bounded length."""
+    text = re.sub(r"<[^>]*>", " ", question_text)
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > MAX_READING_CHARS:
+        cut = text[:MAX_READING_CHARS]
+        end = max(cut.rfind(". "), cut.rfind("? "))
+        text = cut[: end + 1] if end > 80 else cut
+    return text
+
+
+def make_tts_reading(text: str, output_dir: str) -> str | None:
+    """Speak `text` with the macOS system voice. This stack runs on a Mac, so `say` is always
+    there; anywhere else this returns None and the question plays without a reading."""
+    if not text:
+        return None
+    path = os.path.join(output_dir, "reading_tts.aiff")
+    try:
+        subprocess.run(["say", "-o", path, text], check=True, capture_output=True, timeout=30)
+        return path if os.path.getsize(path) > 0 else None
+    except Exception as e:
+        print(f"[HLS] TTS reading failed: {e}")
+        return None
+
+
+def find_human_reading(qid: str, qb_id: int | None, output_dir: str) -> str | None:
+    """A person's recording of this question from the Record page, if one exists."""
+    if _audio_col is None or _audio_blobs is None:
+        return None
+    keys = {qid}
+    if qb_id is not None:
+        keys |= {qb_id, str(qb_id)}
+    try:
+        qb_ids = set()
+        for doc in _audio_col.find({"_id": {"$in": list(keys)}}, {"qb_id": 1}):
+            qb_ids.add(doc.get("qb_id"))
+        qb_ids |= {k for k in keys if k != qid}
+        qb_ids |= {str(k) for k in list(qb_ids) if k is not None}
+        cursor = _audio_col.find(
+            {"qb_id": {"$in": [k for k in qb_ids if k is not None]}, "recType": "normal",
+             "userId": {"$exists": True, "$ne": None}},
+            {"_id": 1},
+        )
+        for doc in cursor:
+            if _audio_blobs.exists(doc["_id"]):
+                path = os.path.join(output_dir, "reading_human.wav")
+                with open(path, "wb") as f:
+                    f.write(_audio_blobs.get(doc["_id"]).read())
+                return path
+    except Exception as e:
+        print(f"[HLS] Human reading lookup failed for {qid}: {e}")
+    return None
+
+
+def prepare_reading(mode: str, qid: str, qb_id: int | None, question_text: str, output_dir: str):
+    """Returns (path, reader). A human reading falls back to the computer voice when nobody has
+    recorded the question yet, so a "human" game never plays a question with no reading at all."""
+    if mode not in ("human", "tts"):
+        return None, None
+    if mode == "human":
+        path = find_human_reading(qid, qb_id, output_dir)
+        if path:
+            return path, "human"
+    path = make_tts_reading(reading_text(question_text), output_dir)
+    return (path, "tts") if path else (None, None)
+
+
+def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None,
+                           mode: str = "text") -> dict:
+    """Builds the stream. Returns {"lead": seconds of reading before the clip, "reader": ...}."""
     # 1. VTT (question text cues)
     duration = 60.0
     has_subtitles = False
@@ -229,6 +322,16 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
                     cue_lines.append(line)
         question_text = "\n".join(cue_lines)
 
+    reading_path, reader = prepare_reading(mode, qid, qb_id, question_text, output_dir)
+    lead = 0.0
+    if reading_path:
+        try:
+            lead = get_audio_duration(reading_path) + READING_GAP_SECONDS
+            print(f"[HLS] {reader} reading for {qid}: {lead:.1f}s")
+        except Exception as e:
+            print(f"[HLS] Reading unusable for {qid}: {e}")
+            reading_path, reader = None, None
+
     # 2. Audio.
     #
     # For an AUDITA question the dataset clip *is* the question, so it is the authoritative source
@@ -251,7 +354,7 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
             with open(audio_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
                     f.write(chunk)
-            transcode_to_hls(audio_path, output_dir)
+            transcode_to_hls(audio_path, output_dir, reading_path)
             got_audio = True
             used_dataset = True
             print(f"[HLS] Audio transcoded for {qid} (dataset clip)")
@@ -271,7 +374,7 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
             with open(audio_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
                     f.write(chunk)
-            transcode_to_hls(audio_path, output_dir)
+            transcode_to_hls(audio_path, output_dir, reading_path)
             got_audio = True
             print(f"[HLS] Audio transcoded for {qid} (backend source)")
         except Exception as e:
@@ -281,7 +384,7 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
     # downloading all 9,686 files), so stretch the single cue over the clip's real duration.
     if used_dataset and has_subtitles:
         try:
-            audio_dur = get_audio_duration(audio_path)
+            audio_dur = get_audio_duration(audio_path) + lead
             if audio_dur > 0:
                 end_ts = f"{int(audio_dur // 60):02d}:{audio_dur % 60:06.3f}"
                 # Keep the prompt's line structure. A cue may span lines, but a BLANK line would
@@ -328,6 +431,11 @@ def download_and_transcode(qid: str, output_dir: str, qb_id: int | None = None) 
     with open(os.path.join(output_dir, "index.m3u8"), "w") as f:
         f.write(build_master_m3u8(has_subtitles))
 
+    # A reading only counts if it made it into the stream.
+    if not got_audio:
+        lead, reader = 0.0, None
+    return {"lead": round(lead, 3), "reader": reader}
+
 
 # --- API endpoints ---
 
@@ -338,18 +446,20 @@ def batch():
 
     qids = request.form.getlist("qids")
     raw_qb_ids = request.form.getlist("qb_ids")
+    mode = request.form.get("mode", "text")
     result_streams = []
     for i, qid in enumerate(qids):
         qb_id = int(raw_qb_ids[i]) if i < len(raw_qb_ids) and raw_qb_ids[i].isdigit() else None
         rid = str(uuid.uuid4())
         stream_dir = os.path.join(STREAM_DIR, rid)
         os.makedirs(stream_dir, exist_ok=True)
+        info = {"lead": 0.0, "reader": None}
         try:
-            download_and_transcode(qid, stream_dir, qb_id=qb_id)
+            info = download_and_transcode(qid, stream_dir, qb_id=qb_id, mode=mode) or info
         except Exception as e:
             print(f"[HLS] Fatal error for {qid}: {e}")
         streams[rid] = {"qid": qid, "path": stream_dir, "token": None}
-        result_streams.append({"qid": qid, "rid": rid})
+        result_streams.append({"qid": qid, "rid": rid, **info})
 
     return jsonify({"streams": result_streams})
 

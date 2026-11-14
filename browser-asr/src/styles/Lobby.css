@@ -51,6 +51,7 @@
     margin-left: 0.5rem;
     border: 3px solid white;
     cursor: pointer;
+    text-align: center;  /* "Read by a person" puts its availability note on a second line */
 }
 
 .lobby-gamesettings-selector-selected {
@@ -211,4 +212,15 @@
     padding: 0.75rem;
     border-radius: 0.5rem;
     cursor: pointer;
+}
+/* The question-mode selector has three options; let it wrap instead of overflowing the panel. */
+.lobby-gamesettings-setting-wrapper .lobby-gamesettings-hor-flex {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 0.3rem;
+}
+
+.lobby-gamesettings-selector-disabled {
+    color: #a3abc0;
+    cursor: not-allowed;
 }

@@ -2238,6 +2238,34 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
 
         return {"results": history[start:end]}
 
+    def _human_recorded_qb_ids() -> list:
+        """qb_ids of questions a person has recorded and whose audio we can actually serve.
+
+        Human readings come from the Record page and are stored in GridFS (AudioBlobs) under their
+        Audio doc's _id. Older recordings point at the dead Firebase bucket, so a doc only counts
+        when its blob is in GridFS. Both str and int forms are returned because qb_id was stored
+        inconsistently across imports.
+        """
+        rec_ids = [d["_id"] for d in qtpm.audio.find(
+            {"recType": "normal", "userId": {"$exists": True, "$ne": None}}, {"_id": 1})]
+        if not rec_ids:
+            return []
+        served = set(d["_id"] for d in qtpm.database["AudioBlobs.files"].find(
+            {"_id": {"$in": rec_ids}}, {"_id": 1}))
+        qb_ids = set()
+        for d in qtpm.audio.find({"_id": {"$in": list(served)}}, {"qb_id": 1}):
+            if d.get("qb_id") is not None:
+                qb_ids.add(d["qb_id"])
+                qb_ids.add(str(d["qb_id"]))
+        return list(qb_ids)
+
+    @app.get("/question/human_count")
+    def human_recorded_question_count():
+        """How many playable questions have a person's recording ("Read by a person" mode)."""
+        qb_ids = _human_recorded_qb_ids()
+        count = len(qtpm.rec_questions.distinct("qb_id", {"qb_id": {"$in": qb_ids}})) if qb_ids else 0
+        return {"count": count}
+
     @app.route("/question", methods=["GET"])
     def pick_game_question():
         """Retrieve a batch of randomly-selected questions and attempt to retrieve the associated recordings with the
@@ -2265,6 +2293,10 @@ def create_app(test_overrides: dict = None, test_inst_path: str = None, test_sto
         if difficulty_range_arg:
             difficulty_range = [int(num) for num in re.split(r",\s*", difficulty_range_arg)]
             query['difficultyNum'] = {'$gte': difficulty_range[0], '$lte': difficulty_range[1]}
+
+        # "Read by a person" games draw only from questions someone has recorded.
+        if request.args.get("humanOnly") in ("1", "true"):
+            query['qb_id'] = {'$in': _human_recorded_qb_ids()}
 
         if query:
             pipeline.insert(0, {'$match': query})

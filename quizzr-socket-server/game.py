@@ -60,18 +60,40 @@ class Game:
         self.teams = lobby.settings["teams"]
         self.players = lobby.settings["players"]
         self.auth_token = lobby.auth_token
+        # "text" | "human" | "tts" — see lobby.QUESTION_MODES. In the two read-aloud modes the HLS
+        # server puts a spoken reading of the prompt in front of each clip.
+        self.question_mode = lobby.settings.get("question_mode", "text")
+        self.readers = []  # per question: who read it aloud ("human" / "tts"), or None
 
         # HLS Tokens
         self.socketio = socketio
         self.hls_rids = []
         self.hls_tokens = []
         try:
-            raw_questions = requests.get(
+            params = {"batchSize": self.questions_num * self.rounds_num}
+            if self.question_mode == "human":
+                params["humanOnly"] = "1"
+            q_response = requests.get(
                 os.environ.get("BACKEND_URL") + "/question",
-                params={"batchSize": self.questions_num * self.rounds_num},
+                params=params,
                 headers={"Authorization": self.auth_token},
                 timeout=SETUP_HTTP_TIMEOUT,
-            ).json()["results"]
+            )
+            if self.question_mode == "human" and q_response.status_code == 404:
+                self.good_game = False
+                socketio.emit("startgamefailed", to=self.gamecode)
+                socketio.emit("alert", ["error", "No questions have been read aloud by a person yet. "
+                                        "Record some on the Record page, or pick another question mode."],
+                              to=self.gamecode)
+                return
+            raw_questions = q_response.json()["results"]
+            # Fewer questions than asked for (only possible in human mode, where the pool is the
+            # recorded questions): play what there is as a single round rather than failing.
+            if len(raw_questions) < self.questions_num * self.rounds_num:
+                self.rounds_num = 1
+                self.questions_num = len(raw_questions)
+                socketio.emit("alert", ["show", f"Only {len(raw_questions)} question(s) have a human "
+                                        "reading, so this game is shorter."], to=self.gamecode)
             self.questions = []  # id, qb_id, time length
             for question in raw_questions:
                 final_vtt = requests.get(
@@ -110,15 +132,22 @@ class Game:
                         "handshake": os.environ.get("HLS_HANDSHAKE"),
                         "qids": [i[0] for i in self.questions],
                         "qb_ids": [str(i[1]) for i in self.questions],
-                        "expiry": str(expiry_time)
+                        "expiry": str(expiry_time),
+                        "mode": self.question_mode,
                     },
-                    timeout=SETUP_HTTP_TIMEOUT,
+                    # A reading has to be synthesised and mixed per question, on top of the
+                    # transcode, so read-aloud games get more time to prepare.
+                    timeout=SETUP_HTTP_TIMEOUT * (1 if self.question_mode == "text" else 3),
                 )
                 print(hls_response.json())
+                self.readers = [None] * len(self.questions)
                 for pair in hls_response.json()["streams"]:
-                    self.hls_rids[
-                        [x[0] for x in self.questions].index(pair["qid"])
-                    ] = pair["rid"]
+                    idx = [x[0] for x in self.questions].index(pair["qid"])
+                    self.hls_rids[idx] = pair["rid"]
+                    # The reading plays before the clip inside the same stream, so the question
+                    # clock has to run that much longer or the reading eats the clip's time.
+                    self.questions[idx][2] += float(pair.get("lead") or 0)
+                    self.readers[idx] = pair.get("reader")
             except Exception as e:
                 print(e)
                 self.good_game = False
@@ -216,7 +245,10 @@ class Game:
                     {
                         "rid": self.hls_rids[question_idx],
                         "token": self.hls_tokens[question_idx],
-                        "classifiable": False
+                        "classifiable": False,
+                        # Read-aloud modes hide the prompt text; the reveal still shows the answer.
+                        "show_text": self.question_mode == "text",
+                        "reader": self.readers[question_idx] if question_idx < len(self.readers) else None,
                         #     AudioClassifier.is_predictable(
                         #     self.answering_ids[self.round - 1][self.question - 1]
                         # ),

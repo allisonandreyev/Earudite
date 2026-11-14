@@ -1,81 +1,260 @@
+/* Animated "how to play" demo (components/Tutorial.jsx). Used as the Tutorial screen and as an
+   overlay on the Play page. */
+
 .tutorial-wrapper {
     display: flex;
     flex-direction: column;
-    border-radius: 1.5rem;
+    gap: 1rem;
     width: 100%;
     height: 100%;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 1.5rem;
+    box-sizing: border-box;
 }
 
-.tutorial-img-wrapper {
-    flex-grow: 3;
-    flex-basis: 0;
+.tutorial-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.tutorial-heading {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #2b3245;
+}
+
+.tutorial-close {
+    cursor: pointer;
+    color: #6287f7;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+}
+
+.tutorial-progress {
+    display: flex;
+    gap: 0.35rem;
+}
+
+.tutorial-progress-seg {
+    flex: 1;
+    height: 0.4rem;
+    border-radius: 0.2rem;
+    background: #e3e8f6;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.tutorial-progress-fill {
+    height: 100%;
+    background: #6287f7;
+    transition: width 0.1s linear;
+}
+
+/* --- mock game card --- */
+
+.tutorial-mock {
+    border: 2px solid #e3e8f6;
+    border-radius: 1rem;
     padding: 1rem;
+    background: #f8faff;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.tutorial-mock-top {
+    display: flex;
+    justify-content: space-between;
+    color: #7a849c;
+    font-size: 0.9rem;
+}
+
+.tutorial-mock-score {
+    font-weight: 600;
+    color: #2b3245;
+}
+
+.tutorial-mock-prompt {
+    background: white;
+    border-radius: 0.6rem;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.tutorial-mock-prompt-text {
+    color: #2b3245;
+}
+
+.tutorial-mock-wave {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 2rem;
+    flex-shrink: 0;
+}
+
+.tutorial-mock-wave span {
+    width: 3px;
+    height: 20%;
+    border-radius: 2px;
+    background: #b9c6ef;
+}
+
+.tutorial-mock-wave-on span {
+    background: #6287f7;
+    animation: tutorial-wave 0.7s ease-in-out infinite alternate;
+}
+
+@keyframes tutorial-wave {
+    from { height: 15%; }
+    to { height: 100%; }
+}
+
+.tutorial-mock-answer-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: stretch;
+}
+
+.tutorial-mock-buzz {
+    flex-shrink: 0;
+    width: 6.5rem;
     display: flex;
     align-items: center;
     justify-content: center;
+    border-radius: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: white;
+    background: #9aa8d6;
+    transition: background 0.2s, transform 0.2s;
 }
 
-.tutorial-img {
-    height:25rem;
-    width: auto;
+.tutorial-mock-buzz-on {
+    background: #e2574c;
+    transform: scale(1.04);
 }
 
-.tutorial-footer-wrapper {
+.tutorial-mock-answer {
+    flex: 1;
+    min-height: 2.6rem;
     display: flex;
-    flex-basis: 0;
-    flex-grow: 1;
+    align-items: center;
+    padding: 0 0.85rem;
+    border-radius: 0.6rem;
+    background: white;
+    border: 2px solid #e3e8f6;
+    color: #2b3245;
+    font-size: 1.05rem;
+}
+
+.tutorial-mock-answer-on {
+    border-color: #6287f7;
+}
+
+.tutorial-mock-placeholder {
+    color: #a3abc0;
+}
+
+.tutorial-mock-footer {
+    min-height: 2rem;
+    display: flex;
+    gap: 0.75rem;
     align-items: center;
 }
 
-.tutorial-footer-text {
-    flex-basis: 0;
-    flex-grow: 1;
+.tutorial-mock-say,
+.tutorial-mock-correct {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 1rem;
+    font-weight: 600;
+    animation: tutorial-pop 0.25s ease-out;
+}
+
+.tutorial-mock-say {
+    background: #e8eeff;
+    color: #3d5fd1;
+}
+
+.tutorial-mock-correct {
+    background: #e2f5e5;
+    color: #2e7d3a;
+}
+
+@keyframes tutorial-pop {
+    from { transform: scale(0.85); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+
+/* --- caption + controls --- */
+
+.tutorial-caption {
+    min-height: 5.5rem;
+}
+
+.tutorial-caption-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #2b3245;
+    margin-bottom: 0.3rem;
+}
+
+.tutorial-caption-text {
+    color: #4b546b;
+    line-height: 1.45;
+}
+
+.tutorial-controls {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+}
+
+.tutorial-btn {
+    cursor: pointer;
+    padding: 0.45rem 1rem;
+    border-radius: 0.5rem;
+    border: 2px solid #e3e8f6;
+    color: #2b3245;
+    user-select: none;
+}
+
+.tutorial-btn:hover {
+    border-color: #6287f7;
+}
+
+.tutorial-btn-primary {
+    background: #6287f7;
+    border-color: #6287f7;
+    color: white;
+}
+
+/* --- overlay (Play page) --- */
+
+.tutorial-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(20, 26, 45, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding: 1rem;
 }
 
-.tutorial-img-divider {
-    width: 99.8%;
-    border: 1px solid #EFF2FC;
-}
-
-.tutorial-footer-btns-wrapper {
-    width: 10rem;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-    align-items: center;
-}
-
-.tutorial-footer-btns-page {
-    color: rgb(151, 151, 151);
-    font-size: 1.5rem;
-}
-
-.tutorial-footer-btns-btn-wrapper {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-around;
+.tutorial-overlay-card {
+    background: white;
+    border-radius: 1.25rem;
     width: 100%;
-}
-
-.tutorial-footer-btns-btn {
-    background-color: #6287F6;
-    border-radius: 0.25rem;
-    padding: 0.25rem 0.5rem 0.25rem 0.5rem;
-    color: white;
-    cursor: pointer;
-}
-
-.tutorial-footer-btns-exit {
-    background-color: rgb(255, 128, 128);
-    border-radius: 0.25rem;
-    padding: 0.25rem 1rem 0.25rem 1rem;
-    color: white;
-    cursor: pointer;
-}
-
-.tutorial-footer-divider {
-    height: 70%;
-    border: 1px solid #EFF2FC;
+    max-width: 44rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    box-shadow: 0 1rem 3rem rgba(20, 26, 45, 0.25);
 }

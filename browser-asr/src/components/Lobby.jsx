@@ -2,13 +2,44 @@ import "../styles/Lobby.css";
 import { useState, useEffect, useReducer, useRef } from "react";
 import PersonIcon from '@material-ui/icons/Person';
 import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
-import { LOBBY_CODE, SOCKET, PLAY_SCREEN, SCREEN, AUTHTOKEN, PROFILE, GAMESETTINGS } from "../store";
+import { LOBBY_CODE, SOCKET, PLAY_SCREEN, SCREEN, AUTHTOKEN, PROFILE, GAMESETTINGS, URLS } from "../store";
+import axios from "axios";
 import { useVoiceCommands } from "../voice/registry";
 import Slider from '@material-ui/core/Slider';
 import SwapVertIcon from '@material-ui/icons/SwapVert';
 import {
     Tooltip,
 } from 'react-tippy';
+
+// How questions are presented. Mirrors lobby.QUESTION_MODES on the socket server.
+export const QUESTION_MODES = [
+    { id: 'text', label: 'Audio + text', help: 'The clip plays with the question shown on screen.' },
+    { id: 'human', label: 'Read by a person', help: 'A person reads the question aloud, then the clip plays. Only questions someone has recorded are used.' },
+    { id: 'tts', label: 'Read by computer', help: 'A computer voice reads the question aloud, then the clip plays.' },
+];
+
+// How many questions have a person's recording. "Read by a person" plays only those, so the option
+// is unavailable while this is 0. null while loading (the option stays usable until we know).
+export function useHumanQuestionCount() {
+    const urls = useRecoilValue(URLS);
+    const [count, setCount] = useState(null);
+    useEffect(() => {
+        let live = true;
+        axios.get(urls['dataflow'] + '/question/human_count')
+            .then((r) => { if (live) setCount(r.data.count); })
+            .catch(() => { /* leave it usable; the server reports an empty pool when starting */ });
+        return () => { live = false; };
+    }, [urls]);
+    return count;
+}
+
+// Label and availability of a question mode, given the human-recording count.
+export function modeState(m, humanCount) {
+    if (m.id !== 'human' || humanCount === null) return { label: m.label, disabled: false, help: m.help };
+    // The availability note goes on its own line under the mode name.
+    if (humanCount === 0) return { label: <>{m.label}<br/>(none yet)</>, disabled: true, help: 'No questions have been recorded by a person yet. Record some on the Record page.' };
+    return { label: <>{m.label}<br/>({humanCount})</>, disabled: false, help: `${humanCount} question(s) have a human reading. Games in this mode use only those.` };
+}
 
 // player hook in lobby w/ switching functionality
 function Player(props) {
@@ -180,8 +211,10 @@ function Lobby() {
     const setPlayScreen = useSetRecoilState(PLAY_SCREEN);
     const setScreen = useSetRecoilState(SCREEN);
     const authtoken = useRecoilValue(AUTHTOKEN);
-    const [lobbyScreen, setLobbyScreen] = useState("inlobby");
     const [recoilGameSettings, setRecoilGameSettings] = useRecoilState(GAMESETTINGS);
+    const humanCount = useHumanQuestionCount();
+    // Quick Play has already asked the server to start the game, so open on the loading screen.
+    const [lobbyScreen, setLobbyScreen] = useState(recoilGameSettings['quickstart'] ? "loading" : "inlobby");
 
     const initialGameSettings = clone(recoilGameSettings);
     console.log(recoilGameSettings);
@@ -191,6 +224,12 @@ function Lobby() {
         (state, newState) => ({...state, ...newState}),
         initialGameSettings
     );
+
+    // The quickstart flag is for this lobby only; the next lobby must open on its settings.
+    useEffect(() => {
+        if (recoilGameSettings['quickstart']) setGameSettings({ 'quickstart': false });
+        // eslint-disable-next-line
+    }, []);
 
     // Copy game settings over to the recoil value
     useEffect(() => {
@@ -209,6 +248,7 @@ function Lobby() {
                 'questions_num': data['questions_num'],
                 'gap_time': data['gap_time'],
                 'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
             });
             setLobbyCode(data['code']);
         };
@@ -300,6 +340,24 @@ function Lobby() {
             run: () => updateSettings({ teams: 2 }),
         },
         {
+            id: 'lobby.modeText',
+            label: 'Audio + text questions',
+            phrases: ['text mode', 'audio and text', 'show text'],
+            run: () => updateSettings({ question_mode: 'text' }),
+        },
+        {
+            id: 'lobby.modeHuman',
+            label: 'Questions read by a person',
+            phrases: ['human mode', 'read by a person', 'human reader'],
+            run: () => { if (humanCount !== 0) updateSettings({ question_mode: 'human' }); },
+        },
+        {
+            id: 'lobby.modeTts',
+            label: 'Questions read by computer',
+            phrases: ['computer mode', 'read by computer', 'computer voice', 'text to speech'],
+            run: () => updateSettings({ question_mode: 'tts' }),
+        },
+        {
             id: 'lobby.teams0',
             label: 'No teams',
             phrases: ['no teams', 'teams off', 'free for all'],
@@ -355,6 +413,22 @@ function Lobby() {
                                     />
                                 </div>
                             </div> */}
+                        </div>
+                        <div class="lobby-gamesettings-setting-wrapper">
+                            <div>Questions</div>
+                            <div class="lobby-gamesettings-hor-flex">
+                                {QUESTION_MODES.map((m) => {
+                                    const st = modeState(m, humanCount);
+                                    return (
+                                        <Tooltip key={m.id} title={st.help} position="top" trigger="mouseenter" unmountHTMLWhenHide="true">
+                                            <div onClick={() => { if (!st.disabled) updateSettings({'question_mode': m.id}); }}
+                                                 className={"lobby-gamesettings-selector-item " + (st.disabled ? "lobby-gamesettings-selector-disabled " : "") + ((gameSettings['question_mode'] || 'text') === m.id ? "lobby-gamesettings-selector-selected" : "")}>
+                                                {st.label}
+                                            </div>
+                                        </Tooltip>
+                                    );
+                                })}
+                            </div>
                         </div>
                         <div class="lobby-gamesettings-setting-wrapper">
                             <div>Questions per round</div>

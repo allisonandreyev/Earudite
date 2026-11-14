@@ -21,6 +21,7 @@ import CloseIcon from '@material-ui/icons/Close';
 import ThumbUpIcon from '@material-ui/icons/ThumbUp';
 import ThumbDownIcon from '@material-ui/icons/ThumbDown';
 import CheckIcon from '@material-ui/icons/Check';
+import VolumeUpIcon from '@material-ui/icons/VolumeUp';
 
 import { useQuestion } from "online-answering";
 import { Tooltip } from "react-tippy";
@@ -418,6 +419,10 @@ function Game() {
   const [token, setToken] = useState("");
   const [rid, setRid] = useState("");
   const [classifiable, setClassifiable] = useState(true);
+  // Question mode, per question, from the server's hlsupdate. In the read-aloud modes the prompt is
+  // spoken before the clip and its text stays hidden until the question ends.
+  const [showText, setShowText] = useState(true);
+  const [reader, setReader] = useState(null);
 
   // URLS
   const urls = useRecoilValue(URLS);
@@ -508,6 +513,8 @@ function Game() {
       setToken(data["token"]);
       setRid(data["rid"]);
       setClassifiable(data["classifiable"]);
+      setShowText(data["show_text"] !== false);
+      setReader(data["reader"] || null);
       setAnswerText("");
       setLastSubmittedAnswer("");
       setLastAnswerCorrect(null);
@@ -724,9 +731,20 @@ function Game() {
                   )}
                 </div>
 
+                {/* Read-aloud modes: the cues still land in #transcript-box (so the prompt is there to
+                    reveal once the question ends), it is just not shown while the question runs. */}
+                {!showText && !state.correctAnswer && (
+                  <div className="game-transcriptbox game-readaloud-note">
+                    <VolumeUpIcon style={{ verticalAlign: "middle", marginRight: "0.4rem" }} />
+                    Listen: this question is read aloud
+                    {reader === "human" ? " by a person" : reader === "tts" ? " by a computer voice" : ""}
+                    , then the clip plays.
+                  </div>
+                )}
                 <div
                   class="game-transcriptbox"
                   id="transcript-box"
+                  style={!showText && !state.correctAnswer ? { display: "none" } : undefined}
                   className={
                     "game-transcriptbox " +
                     (state.buzzer !== "" ? "game-buzzedin-blur" : "")

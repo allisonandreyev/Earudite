@@ -97,6 +97,7 @@ function StandardLobby() {
                 'questions_num': data['questions_num'],
                 'gap_time': data['gap_time'],
                 'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
             });
             setLobbyCode(data['code']);
         };

@@ -6,6 +6,9 @@ import Leaderboards from "./Leaderboards.jsx";
 import { useVoiceCommands } from "../voice/registry";
 import { useEffect } from "react";
 import { useAlert } from 'react-alert'
+import Tutorial, { tutorialSeen } from "./Tutorial.jsx";
+import { QUESTION_MODES, useHumanQuestionCount, modeState } from "./Lobby.jsx";
+import FlashOnIcon from '@material-ui/icons/FlashOn';
 
 
 // ASSETS
@@ -191,7 +194,7 @@ function StartCasualSoloLobbyButton(props) {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
-            if (!takeLobbyRequest()) return;
+            if (quickPlayPending || !takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -200,6 +203,7 @@ function StartCasualSoloLobbyButton(props) {
                 'questions_num': data['questions_num'],
                 'gap_time': data['gap_time'],
                 'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
             });
             setLobbyCode(data['code']);
             setPlayScreen("casualsolo");
@@ -238,7 +242,7 @@ function StartCustomLobbyButton() {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
-            if (!takeLobbyRequest()) return;
+            if (quickPlayPending || !takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -247,6 +251,7 @@ function StartCustomLobbyButton() {
                 'questions_num': data['questions_num'],
                 'gap_time': data['gap_time'],
                 'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
             });
             setLobbyCode(data['code']);
             setPlayScreen("custom");
@@ -283,6 +288,114 @@ function StartCustomLobbyButton() {
     )
 }
 
+// QUICK PLAY
+//
+// One click from the Play page to a running game: create a lobby with sensible defaults already
+// applied (startlobby carries them, see main.py), then start it as soon as the lobby exists. Other
+// players can still join with the code shown in-game, but nobody waits on a settings screen.
+const QUICK_PLAY_SETTINGS = { teams: 0, rounds: 1, questions_num: 5, gap_time: 5, post_buzz_time: 5 };
+const QUICK_MODE_KEY = 'earudite_quickplay_mode';
+
+function loadQuickMode() {
+    try {
+        const m = window.localStorage.getItem(QUICK_MODE_KEY);
+        return QUESTION_MODES.some((q) => q.id === m) ? m : 'text';
+    } catch (e) { return 'text'; }
+}
+
+// Set while a Quick Play lobby is being created, so only Quick Play's listener acts on the reply.
+let quickPlayPending = false;
+
+function QuickPlayCard() {
+    const socket = useRecoilValue(SOCKET);
+    const setLobbyCode = useSetRecoilState(LOBBY_CODE);
+    const setPlayScreen = useSetRecoilState(PLAY_SCREEN);
+    const setGameSettings = useSetRecoilState(GAMESETTINGS);
+    const authtoken = useRecoilValue(AUTHTOKEN);
+    const [mode, setMode] = useState(loadQuickMode);
+    const humanCount = useHumanQuestionCount();
+    // A remembered "human" choice is useless once we know nothing has been recorded.
+    const effectiveMode = mode === 'human' && humanCount === 0 ? 'text' : mode;
+
+    useEffect(() => {
+        const lobbyStateListener = (data) => {
+            if (!quickPlayPending || !takeLobbyRequest()) return;
+            quickPlayPending = false;
+            setGameSettings({
+                'players': data['players'],
+                'teams': data['teams'],
+                'max_players': data['max_players'],
+                'rounds': data['rounds'],
+                'questions_num': data['questions_num'],
+                'gap_time': data['gap_time'],
+                'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
+                // Lobby opens straight on its loading screen instead of the settings.
+                'quickstart': true,
+            });
+            setLobbyCode(data['code']);
+            setPlayScreen("custom");
+            socket.emit("lobbyloading", { auth: authtoken });
+            socket.emit("startgame", { auth: authtoken });
+        };
+        socket.on("lobbystate", lobbyStateListener);
+        return () => socket.off("lobbystate", lobbyStateListener);
+    });
+
+    function quickPlay() {
+        quickPlayPending = true;
+        // If the reply never comes, stop treating the next lobbystate as Quick Play's.
+        setTimeout(() => { quickPlayPending = false; }, LOBBY_REQUEST_WINDOW_MS);
+        requestLobby();
+        socket.emit("startlobby", {
+            auth: authtoken,
+            gamemode: "custom",
+            settings: { ...QUICK_PLAY_SETTINGS, question_mode: effectiveMode },
+        });
+    }
+
+    function pickMode(m) {
+        setMode(m);
+        try { window.localStorage.setItem(QUICK_MODE_KEY, m); } catch (e) { /* private mode */ }
+    }
+
+    useVoiceCommands('play.quickPlay', [
+        {
+            id: 'play.quick',
+            label: 'Quick play',
+            phrases: ['quick play', 'quickplay', 'play now', 'quick game', 'jump in'],
+            run: quickPlay,
+        },
+    ]);
+
+    return (
+        <div class="play-gamemodecard-wrapper play-quickplay-card">
+            <div class="play-quickplay-icon"><FlashOnIcon style={{ fontSize: "3.5rem", color: "#6287f7" }}/></div>
+            <div class="play-gamemodecard-title">
+                Quick Play
+            </div>
+            <div class="play-gamemodecard-description">
+                Setup free mini-game!
+            </div>
+            <div class="play-quickplay-modes">
+                {QUESTION_MODES.map((m) => {
+                    const st = modeState(m, humanCount);
+                    return (
+                        <div key={m.id} title={st.help}
+                             className={"play-quickplay-mode " + (st.disabled ? "play-quickplay-mode-disabled " : "") + (effectiveMode === m.id ? "play-quickplay-mode-selected" : "")}
+                             onClick={() => { if (!st.disabled) pickMode(m.id); }}>
+                            {st.label}
+                        </div>
+                    );
+                })}
+            </div>
+            <div class="play-gamemodecard-start play-hvr-grow" onClick={quickPlay}>
+                PLAY
+            </div>
+        </div>
+    );
+}
+
 function JoinCustomLobbyCard(props) {
     const [text, setText] = useState("");
     const setPlayScreen = useSetRecoilState(PLAY_SCREEN);
@@ -293,7 +406,7 @@ function JoinCustomLobbyCard(props) {
 
     useEffect(() => {
         const lobbyStateListener = (data) => {
-            if (!takeLobbyRequest()) return;
+            if (quickPlayPending || !takeLobbyRequest()) return;
             setGameSettings({
                 'players': data['players'],
                 'teams': data['teams'],
@@ -302,6 +415,7 @@ function JoinCustomLobbyCard(props) {
                 'questions_num': data['questions_num'],
                 'gap_time': data['gap_time'],
                 'post_buzz_time': data['post_buzz_time'],
+                'question_mode': data['question_mode'] || 'text',
             });
             setLobbyCode(data['code']);
             setPlayScreen("custom");
@@ -330,7 +444,7 @@ function JoinCustomLobbyCard(props) {
         <div class="play-gamemodecard-wrapper">
             <div class="play-gamemodecard-pfp" style={{ backgroundImage: `url(${props.icon})` }}></div>
             <div class="play-gamemodecard-title">
-                Join a lobby!
+                Join a Lobby!
             </div>
 
             <input type="text" value={text} placeholder={"Room code"} onChange={handleText} class="play-joincustomlobbycard-textbox"/>
@@ -363,13 +477,17 @@ function Play(props) {
     // Only Custom is live; the casual/ranked/solo branches below are kept for when those return.
     const gamemode = "custom";
     const tab = props.tab || "games";
+    // The how-to-play demo opens by itself the first time someone reaches the Play page.
+    const [showTutorial, setShowTutorial] = useState(() => !tutorialSeen());
 
     return (
         <div class="play-content-wrapper">
             <div class="play-gamemode-wrapper">
                 <PlayTab name={"Games"} self={"games"} tab={tab} screen={3} hash={"play"}/>
                 <PlayTab name={"Leaderboards"} self={"leaderboards"} tab={tab} screen={5} hash={"leaderboards"}/>
+                <div class="play-howto-btn" onClick={() => setShowTutorial(true)}>How to play</div>
             </div>
+            {showTutorial && <Tutorial onClose={() => setShowTutorial(false)}/>}
 
             { tab === "leaderboards" &&
                 <div class="play-leaderboards-wrapper">
@@ -399,6 +517,7 @@ function Play(props) {
                 }
                 { gamemode === "custom" && // Custom
                     <>
+                        <QuickPlayCard/>
                         <GamemodeCard icon={GamemodeIcon4} gamesettings={gameSettingsList[5]} gamemode="custom"/>
                         <JoinCustomLobbyCard icon={GamemodeIcon7}/>
                     </>

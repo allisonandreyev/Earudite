@@ -438,3 +438,13 @@
 .game-keybinds-key-enter {
   position: relative;
 }
+/* Read-aloud question modes: stands in for the hidden prompt text while the question runs. */
+.game-readaloud-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #5f6b85;
+  font-size: 1.1rem;
+  white-space: normal;
+  text-align: center;
+}

@@ -7,9 +7,13 @@
 }
 
 .play-gamemode-wrapper {
-    width: 100%;
+    /* As wide as the three game cards below (3 x (1.25rem margin + 14rem card)), so the
+       "How to play" button's right edge lines up with the Join card's. */
+    width: 45.75rem;
+    max-width: 100%;
+    box-sizing: border-box;
     display: flex;
-    padding: 1rem 1rem 0 1rem;
+    padding: 1rem 0 0 1rem;
 }
 
 .play-gamemode-btn {
@@ -128,4 +132,63 @@
     padding: 0.25rem;
     border-radius: 0.5rem;
     border: 2px solid #88a1eb;
+}
+/* Quick Play card */
+.play-quickplay-icon {
+    width: 9rem;
+    height: 9rem;
+    margin-top: 1rem;
+    border-radius: 50%;
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.play-quickplay-modes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: calc(100% - 2rem);
+    margin: 0.5rem 0;
+}
+
+.play-quickplay-mode {
+    cursor: pointer;
+    text-align: center;
+    font-size: 0.85rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.4rem;
+    background: white;
+    border: 2px solid white;
+    user-select: none;
+}
+
+.play-quickplay-mode-selected {
+    border-color: #6287f7;
+    font-weight: 600;
+}
+
+/* "How to play" sits at the right end of the Play tabs row. */
+.play-howto-btn {
+    margin-left: auto;
+    margin-right: 0;
+    align-self: center;
+    cursor: pointer;
+    color: #6287f7;
+    font-weight: 600;
+    padding: 0.35rem 0.75rem;
+    border: 2px solid #6287f7;
+    border-radius: 0.5rem;
+    user-select: none;
+}
+
+.play-howto-btn:hover {
+    background: #eff2fc;
+}
+
+.play-quickplay-mode-disabled {
+    color: #a3abc0;
+    cursor: not-allowed;
 }

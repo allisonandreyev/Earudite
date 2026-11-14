@@ -329,6 +329,10 @@ def start_lobby(json, methods=['GET', 'POST']):
     while lobbycode in lobbies:
         lobbycode = lobbycode_generator(6)
     lobbies[lobbycode] = lobby.Lobby(username, lobbycode, json['gamemode'], json['auth'])
+    # Quick Play creates its lobby with its settings already applied, so the client can start the
+    # game straight away instead of walking through the settings screen.
+    if isinstance(json.get('settings'), dict):
+        lobbies[lobbycode].update_settings(json['settings'])
     join_room(lobbycode)
     current_lobby[username] = lobbycode
     print("Lobby started. Code: " + lobbycode)

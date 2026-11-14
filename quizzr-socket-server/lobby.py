@@ -1,5 +1,7 @@
 import time
 
+QUESTION_MODES = ("text", "human", "tts")
+
 
 class Lobby:
     def __init__(self, initial_player, code, gamemode, auth_token):
@@ -11,7 +13,11 @@ class Lobby:
             "rounds": 1,  # number of rounds
             "questions_num": 3,  # number of questions per round
             "gap_time": 5,  # time between questions
-            "post_buzz_time": 5  # time after questions players can still buzz
+            "post_buzz_time": 5,  # time after questions players can still buzz
+            # How each question is presented: "text" = clip with the prompt on screen,
+            # "human" = prompt read aloud by a person before the clip, "tts" = read aloud by a
+            # computer voice. See QUESTION_MODES.
+            "question_mode": "text",
         }
         self.start_time = time.time()
         self.auth_token = auth_token
@@ -44,6 +50,8 @@ class Lobby:
                                 players_list.append(player)
                         self.settings['players'] = players_list
 
+            if setting == 'question_mode' and settings[setting] not in QUESTION_MODES:
+                continue  # an unknown mode would reach the HLS server and every client
             if setting in self.settings:
                 self.settings[setting] = settings[setting]
 
