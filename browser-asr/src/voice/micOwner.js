@@ -80,6 +80,63 @@ try {
   // no Web Speech support in this browser — nothing to patch
 }
 
+// Replace react-speech-recognition's result handler (RecognitionManager.updateTranscript, 3.9.0).
+//
+// Its duplicate filter drops any result that arrives final-only (no interim words) when the
+// previous result was ALSO final-only. Ordinary speech always streams interim results first, which
+// resets that flag, so it never trips. A lone short word like "buzz" frequently comes back from the
+// recognizer as a single final result with no interim preview — and so it was discarded as a
+// "duplicate" of whatever sentence came before it. Nothing reached the transcript or the debug box,
+// while every longer phrase worked. Whether the recognizer sends interim results for a short word
+// varies by Chrome version, network and server, which is why it failed on some machines only.
+//
+// Here a result is a duplicate only if it is the same final text at the same result index in the
+// same recognizer session (the double delivery the original filter was written for, on Android).
+let lastFinalOnlyKey = null;
+try {
+  const manager = SpeechRecognition.getRecognitionManager();
+  const recognition = manager && manager.getRecognition();
+  if (manager && recognition && !manager.__earuditeResultPatch) {
+    const isAndroid = /android/i.test(navigator.userAgent || "");
+    const concat = (a, b) => [a, b].map((t) => t.trim()).filter(Boolean).join(" ");
+    manager.updateTranscript = function ({ results, resultIndex }) {
+      const from = resultIndex === undefined ? results.length - 1 : resultIndex;
+      let interim = "";
+      let final = "";
+      for (let i = from; i < results.length; ++i) {
+        const alt = results[i][0];
+        if (voiceDebugOn()) {
+          console.log("[voice] raw result", i, results[i].isFinal ? "FINAL" : "interim",
+            JSON.stringify(alt.transcript), "conf", alt.confidence);
+        }
+        if (results[i].isFinal && (!isAndroid || alt.confidence > 0)) final = concat(final, alt.transcript);
+        else interim = concat(interim, alt.transcript);
+      }
+      this.interimTranscript = interim;
+      this.finalTranscript = final;
+      if (interim === "" && final !== "") {
+        const key = from + "|" + final;
+        if (key === lastFinalOnlyKey) return;
+        lastFinalOnlyKey = key;
+      } else {
+        lastFinalOnlyKey = null;
+      }
+      this.emitTranscriptChange(interim, final);
+    };
+    // The handler was bound when the manager was built; point the recognizer at the new one.
+    recognition.onresult = manager.updateTranscript.bind(manager);
+    // Result indexes restart at 0 with each recognizer session.
+    recognition.addEventListener("start", () => { lastFinalOnlyKey = null; });
+    manager.__earuditeResultPatch = true;
+  }
+} catch (e) {
+  // no Web Speech support in this browser — nothing to patch
+}
+
+function voiceDebugOn() {
+  return typeof window !== "undefined" && !!window.EARUDITE_VOICE_DEBUG;
+}
+
 const claims = new Set();
 const watchers = new Set();
 let listening = false;
